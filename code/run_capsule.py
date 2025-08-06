@@ -12,6 +12,36 @@ data_folder = Path("../data")
 results_folder = Path("../results")
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_nwb_dir", type=str, default=f'nwb')
+    args = parser.parse_args()
+    input_nwb_dir = data_folder / Path(args.input_nwb_dir)
+
+    print('INPUT NWB DIR', input_nwb_dir)
+    assert input_nwb_dir.exists(), "Input NWB dir does not exist"
+    nwb_files = [p for p in input_nwb_dir.iterdir() if p.name.endswith(".nwb") or p.name.endswith(".nwb.zarr")]
+    assert len(nwb_files) == 1, f"Attach one base NWB file data at a time. {len(nwb_files)} found"
+    input_nwb_path = nwb_files[0]
+    print('INPUT NWB', input_nwb_path)
+
+    for file in results_folder.iterdir():
+        shutil.rmtree(file)
+    print(f'cleared results folder: {list(results_folder.iterdir())}')
+
+    # determine if file is zarr or hdf5, and copy it to results
+    result_nwb_path = results_folder / input_nwb_path.name
+    if input_nwb_path.is_dir():
+        assert (input_nwb_path / ".zattrs").is_file(), f"{input_nwb_path.name} is not a valid Zarr folder"
+        NWB_BACKEND = "zarr"
+        io_class = NWBZarrIO
+        shutil.copytree(input_nwb_path, result_nwb_path, dirs_exist_ok=True)
+    else:
+        NWB_BACKEND = "hdf5"
+        io_class = NWBHDF5IO
+        shutil.copyfile(input_nwb_path, result_nwb_path)
+    print(f"NWB backend: {NWB_BACKEND}")
+
+
     asset_paths = [path for path in data_folder.iterdir() if path.name.lower().startswith('slap2')]
     if len(asset_paths) > 1:
         raise Exception(f"{len(asset_paths)}. asset paths found. There can be only one. ")
@@ -28,38 +58,23 @@ def main():
     harp_path = next(asset_path.rglob('.harp'))
     orientations_csv = next((asset_path / 'behavior').rglob('orientations_orientations0.csv'))
 
+    input_nwb_dir = data_folder / 'nwb'
+    input_nwbs = input_nwb_dir.rglob('**.nwb')
+    if 
+
     with open(session_json_path, "r") as f:
         session_json = json.load(f)
     with open(rig_json_path, "r") as f:
         rig_json = json.load(f)
-    with h5py.File(h5_path, "r") as h5:
-        nwbfile, nwb_io = create_nwb_file(nwb_path)
-        harp_data = harp_utils.extract_harp(harp_path)
-        add_ophys_to_nwb(nwbfile, h5, rig_json, harp_data)
-        add_stim_table(nwbfile, orientations_csv, harp_data)
+    with io_class(str(result_nwb_path), "r+") as io:
+        nwb_file = io.read()
+        with h5py.File(h5_path, "r") as h5:
+            harp_data = harp_utils.extract_harp(harp_path)
+            add_ophys_to_nwb(nwbfile, h5, rig_json, harp_data)
+            add_stim_table(nwbfile, orientations_csv, harp_data)
         nwb_io.write(nwbfile)
         nwb_io.close()
-
-
-def create_nwb_file(nwb_path):
-    """
-    Create and return a new NWBFile and NWBHDF5IO handle for writing.
-    nwb_path: Path to the output NWB file.
-    Returns: (nwbfile, nwb_io)
-    """
-    subject_info = {}  # TODO: extract from h5 or elsewhere
-    nwbfile = pynwb.NWBFile(
-        session_description='Session description placeholder',
-        identifier='unique_id_placeholder',
-        session_start_time=datetime.now(),
-        experimenter='experimenter_placeholder',
-        lab='lab_placeholder',
-        institution='institution_placeholder',
-        session_id='session_id_placeholder',
-        subject=None  # TODO: create pynwb.Subject from subject_info
-    )
-    nwb_io = pynwb.NWBHDF5IO(str(nwb_path), 'w')
-    return nwbfile, nwb_io
+    print(f'Wrote output slap2 nwb to {result_nwb_path}')
 
 
 def find_slap2_trial_index(time, start_trials, end_trials):
