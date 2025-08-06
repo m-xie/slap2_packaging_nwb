@@ -4,20 +4,30 @@ import pynwb
 from datetime import datetime
 from pathlib import Path
 from openscope_upload import harp_utils
+import json
+import pandas as pd
 
 
 data_folder = Path("../data")
 results_folder = Path("../results")
 
 def main():
-    asset_path = data_folder / "slap2_session"
+    asset_paths = [path for path in data_folder.iterdir() if path.name.lower().startswith('slap2')]
+    if len(asset_paths) > 1:
+        raise Exception(f"{len(asset_paths)}. asset paths found. There can be only one. ")
+    elif len(asset_paths) == 0:
+        raise Exception(f"No asset paths found.")
+    else:
+        asset_path = asset_paths[0]
+
     h5_path = next(asset_path.rglob("experiment_summary.h5"))
     print("Found h5 file:", h5_path)
-    nwb_path = results_folder / "output.nwb"
+    nwb_path = results_folder / f"{asset_path.name}.nwb"
     session_json_path = next(asset_path.glob("session.json"))
     rig_json_path = next(asset_path.glob("rig.json"))
     harp_path = next(asset_path.rglob('.harp'))
-    import json
+    orientations_csv = next((asset_path / 'behavior').rglob('orientations_orientations0.csv'))
+
     with open(session_json_path, "r") as f:
         session_json = json.load(f)
     with open(rig_json_path, "r") as f:
@@ -26,6 +36,7 @@ def main():
         nwbfile, nwb_io = create_nwb_file(nwb_path)
         harp_data = harp_utils.extract_harp(harp_path)
         add_ophys_to_nwb(nwbfile, h5, rig_json, harp_data)
+        add_stim_table(nwbfile, orientations_csv, harp_data)
         nwb_io.write(nwbfile)
         nwb_io.close()
 
@@ -49,6 +60,75 @@ def create_nwb_file(nwb_path):
     )
     nwb_io = pynwb.NWBHDF5IO(str(nwb_path), 'w')
     return nwbfile, nwb_io
+
+
+def find_slap2_trial_index(time, start_trials, end_trials):
+    # Find index where `time` would be inserted to keep start_trials sorted
+    idx = np.searchsorted(start_trials, time, side='right') - 1
+    
+    # Check bounds and if time fits in the trial interval
+    if idx < 0 or idx >= len(start_trials):
+        raise Exception(f"Time {time} is out of trial bounds")
+    if time > end_trials[idx]:
+        # raise Exception(f"Time {time} not within trial end {end_trials[idx]}")
+        return -1
+    return idx
+
+
+def add_stim_table(nwbfile, orientations_table, harp_data):
+    column_names = [
+        'stim_id',
+        'delay',
+        'duration',
+        'diameter',
+        'x',
+        'y',
+        'contrast',
+        'spatial_frequency',
+        'temporal_frequency',
+        'orientation'
+    ]
+    gratings_df = pd.read_csv(orientations_table, header=None, names=column_names)
+
+    # csv_log = pd.read_csv(asset_path / 'behavior/orientations_logger.csv')
+    # start_gratings_times_csv = np.array(csv_log.loc[csv_log['Value'] == 'StartGrating', 'Timestamp'].tolist())
+
+    slap2_start_times = harp_data['normalized_slap2_start']
+    slap2_end_times = harp_data['normalized_slap2_end']
+    start_gratings_times = harp_data['normalized_start_gratings'][1:] # first time is erroneous (perhaps?)
+
+    # We check there are as many gratings presentation as there are timing data in HARP
+    if len(gratings_df) != len(start_gratings_times):
+        raise ValueError(f"Mismatch between number of grating presentations {len(gratings_df)} and HARP timing data {len(start_gratings_times)}")
+
+    start_time = []
+    stop_time = []
+    slap2_trial_idxs = []
+    for i, row in gratings_df.iterrows():
+        start_time.append(start_gratings_times[i])
+        stop_time.append(start_gratings_times[i] + row['duration'])
+        slap2_trial_idxs.append(find_slap2_trial_index(start_gratings_times[i], slap2_start_times, slap2_end_times))
+    gratings_df['slap2_trial_idx'] = slap2_trial_idxs
+
+    stim_table = pynwb.file.TimeIntervals(name='gratings', description='Gratings presentation intervals')
+
+    # Add all dataframe columns to stim table
+    for col in gratings_df.columns:
+        stim_table.add_column(name=col, description=f'{col} from stimulus dataframe')
+
+    # Add intervals (rows) to stim table
+    for i, row in gratings_df.iterrows():
+        stim_table.add_interval(
+            start_time=start_time[i],
+            stop_time=stop_time[i],
+            **{
+                col: int(row[col]) if col == 'id' else row[col]
+                for col in gratings_df.columns
+            }
+        )
+
+    # Add the TimeIntervals table to the NWB file
+    nwbfile.add_time_intervals(stim_table)
 
 
 def create_imaging_plane(nwbfile, dmd_name, optical_channel, device, rig_json):
