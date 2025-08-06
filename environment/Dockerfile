@@ -1,4 +1,4 @@
-# hash:sha256:62178abc15b441a354f88df6b828863aa664836607d7465e076ad8a24857719d
+# hash:sha256:0a642f42f199ed7ca80d59174a2fbedc720e0b33bb23984eb4b8b9de898316f5
 ARG REGISTRY_HOST
 FROM $REGISTRY_HOST/codeocean/jupyterlab:3.6.1-miniconda4.12.0-python3.9-ubuntu20.04
 
@@ -8,9 +8,9 @@ ARG GIT_ASKPASS
 ARG GIT_ACCESS_TOKEN
 COPY git-askpass /
 
-ADD "https://github.com/coder/code-server/releases/download/v4.95.3/code-server-4.95.3-linux-amd64.tar.gz" /.code-server/code-server.tar.gz
-	
-RUN cd /.code-server \
-    && tar -xvf code-server.tar.gz \
-    && rm code-server.tar.gz \
-    && ln -s /.code-server/code-server-4.95.3-linux-amd64/bin/code-server  /usr/bin/code-server
+RUN pip install -U --no-cache-dir \
+    argparse \
+    h5py==3.14.0 \
+    harp-python==0.4.1 \
+    pynwb==3.1.1 \
+    -e git+https://github.com/AllenInstitute/openscope_upload.git@8196a5b08f154fc4428b816e52ff521fe6951c81#egg=openscope-upload

@@ -6,6 +6,7 @@ from pathlib import Path
 from openscope_upload import harp_utils
 import json
 import pandas as pd
+import argparse
 
 
 data_folder = Path("../data")
@@ -57,10 +58,6 @@ def main():
     rig_json_path = next(asset_path.glob("rig.json"))
     harp_path = next(asset_path.rglob('.harp'))
     orientations_csv = next((asset_path / 'behavior').rglob('orientations_orientations0.csv'))
-
-    input_nwb_dir = data_folder / 'nwb'
-    input_nwbs = input_nwb_dir.rglob('**.nwb')
-    if 
 
     with open(session_json_path, "r") as f:
         session_json = json.load(f)
