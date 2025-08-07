@@ -2,6 +2,10 @@
 	"version": 1,
 	"attached_datasets": [
 		{
+			"id": "02148c18-3e0e-415f-b63d-80ae3df9675b",
+			"mount": "nwb"
+		},
+		{
 			"id": "fd509495-93fb-45b5-90a8-4b46ea416acf",
 			"mount": "SLAP2_803496_2025-07-02_15-33-26"
 		}

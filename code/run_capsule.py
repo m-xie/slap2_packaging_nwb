@@ -8,6 +8,7 @@ from openscope_upload import harp_utils
 import json
 import pandas as pd
 import argparse
+import shutil
 
 
 data_folder = Path("../data")
@@ -64,8 +65,8 @@ def main():
         session_json = json.load(f)
     with open(rig_json_path, "r") as f:
         rig_json = json.load(f)
-    with io_class(str(result_nwb_path), "r+") as io:
-        nwb_file = io.read()
+    with io_class(str(result_nwb_path), "r+") as nwb_io:
+        nwbfile = nwb_io.read()
         with h5py.File(h5_path, "r") as h5:
             harp_data = harp_utils.extract_harp(harp_path)
             add_ophys_to_nwb(nwbfile, h5, rig_json, harp_data)
