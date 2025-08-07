@@ -1,6 +1,7 @@
 import h5py
 import numpy as np
 import pynwb
+import hdmf_zarr
 from datetime import datetime
 from pathlib import Path
 from openscope_upload import harp_utils
@@ -34,11 +35,11 @@ def main():
     if input_nwb_path.is_dir():
         assert (input_nwb_path / ".zattrs").is_file(), f"{input_nwb_path.name} is not a valid Zarr folder"
         NWB_BACKEND = "zarr"
-        io_class = NWBZarrIO
+        io_class = hdmf_zarr.NWBZarrIO
         shutil.copytree(input_nwb_path, result_nwb_path, dirs_exist_ok=True)
     else:
         NWB_BACKEND = "hdf5"
-        io_class = NWBHDF5IO
+        io_class = pynwb.NWBHDF5IO
         shutil.copyfile(input_nwb_path, result_nwb_path)
     print(f"NWB backend: {NWB_BACKEND}")
 
