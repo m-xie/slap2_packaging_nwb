@@ -52,6 +52,7 @@ def main():
         raise Exception(f"No asset paths found.")
     else:
         asset_path = asset_paths[0]
+    print(f"Asset path: {asset_path}")
 
     h5_path = next(asset_path.rglob("experiment_summary.h5"))
     print("Found h5 file:", h5_path)
