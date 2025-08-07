@@ -46,6 +46,7 @@ def main():
 
 
     asset_paths = [path for path in data_folder.iterdir() if path.name.lower().startswith('slap2')]
+    print("asset paths:", asset_paths)
     if len(asset_paths) > 1:
         raise Exception(f"{len(asset_paths)}. asset paths found. There can be only one. ")
     elif len(asset_paths) == 0:
