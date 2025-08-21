@@ -2,16 +2,20 @@
 	"version": 1,
 	"attached_datasets": [
 		{
-			"id": "02148c18-3e0e-415f-b63d-80ae3df9675b",
+			"id": "0e152e7b-4aac-433f-9f45-0c25b0d9cafe",
 			"mount": "nwb"
+		},
+		{
+			"id": "4b10eb00-793f-45bc-a114-d92fb85f2f63",
+			"mount": "multiplane-ophys_764964_2025-03-27_09-15-07_nwb_2025-08-21_20-40-01"
 		},
 		{
 			"id": "6d568a6e-42d9-4a6d-a652-3caf8c4be8f9",
 			"mount": "SLAP2_776270_2025-07-02_11-50-06"
 		},
 		{
-			"id": "fd509495-93fb-45b5-90a8-4b46ea416acf",
-			"mount": "SLAP2_803496_2025-07-02_15-33-26"
+			"id": "b5258830-214a-4678-bf97-cbf79d7fcb9f",
+			"mount": "nwb_1"
 		}
 	]
 }

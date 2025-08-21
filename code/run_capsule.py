@@ -13,11 +13,13 @@ import shutil
 
 data_folder = Path("../data")
 results_folder = Path("../results")
-
+    
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_nwb_dir", type=str, default=f'nwb')
+    parser.add_argument("--expected_n_trials", type=int, default=None)
     args = parser.parse_args()
+    expected_n_trials = args.expected_n_trials
     input_nwb_dir = data_folder / Path(args.input_nwb_dir)
 
     print('INPUT NWB DIR', input_nwb_dir)
@@ -70,7 +72,7 @@ def main():
     with io_class(str(result_nwb_path), "r+") as nwb_io:
         nwbfile = nwb_io.read()
         with h5py.File(h5_path, "r") as h5:
-            harp_data = harp_utils.extract_harp(harp_path)
+            harp_data = harp_utils.extract_harp(harp_path, expected_n_trials=expected_n_trials)
             add_ophys_to_nwb(nwbfile, h5, rig_json, harp_data)
             add_stim_table(nwbfile, orientations_csv, harp_data)
         nwb_io.write(nwbfile)

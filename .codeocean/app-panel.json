@@ -1,0 +1,25 @@
+{
+	"version": 1,
+	"named_parameters": true,
+	"parameters": [
+		{
+			"id": "USGLmDt6NLdwb6QM",
+			"name": "Input NWB Dir",
+			"param_name": "input_nwb_dir",
+			"description": "Directory in which to look for the input NWB",
+			"help_text": "This should be the name of the directory that contains the nwb file you want processed.",
+			"type": "text",
+			"value_type": "string",
+			"default_value": "nwb"
+		},
+		{
+			"id": "h3pVPagLkyyv4V3l",
+			"name": "Expected N Trials",
+			"param_name": "expected_n_trials",
+			"description": "Number of trials the session is expected to have (this is an override setting for older files where erroneous harp trials are recorded)",
+			"help_text": "Should be the total number of trials (valid and invalid) that the original .mat file contained.",
+			"type": "text",
+			"value_type": "string"
+		}
+	]
+}
