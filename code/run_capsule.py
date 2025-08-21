@@ -13,7 +13,7 @@ import shutil
 
 data_folder = Path("../data")
 results_folder = Path("../results")
-    
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_nwb_dir", type=str, default=f'nwb')
