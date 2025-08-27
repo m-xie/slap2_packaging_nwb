@@ -65,6 +65,7 @@ def main():
     harp_path = next(asset_path.rglob('.harp'))
     orientations_csv = next((asset_path / 'behavior').rglob('orientations_orientations0.csv'))
 
+    print('using rig json:', rig_json_path)
     with open(session_json_path, "r") as f:
         session_json = json.load(f)
     with open(rig_json_path, "r") as f:
