@@ -14,7 +14,7 @@
 				},
 				{
 					"name": "git+https://github.com/AllenInstitute/openscope_upload.git#egg=openscope-upload",
-					"version": "84f67765400da435bde26e2c086ea4b7ce198b16"
+					"version": "d54ae99620cb81f92cffa75ecf2fe66e9ee2e3b2"
 				},
 				{
 					"name": "h5py",
@@ -35,29 +35,6 @@
 			],
 			"options": {},
 			"pre_install_options": {}
-		},
-		"vscode": {
-			"packages": [
-				{
-					"name": "continue.continue"
-				},
-				{
-					"name": "ms-python.python"
-				},
-				{
-					"name": "ms-toolsai.jupyter"
-				},
-				{
-					"name": "reageyao.biosyntax"
-				},
-				{
-					"name": "reditorsupport.r"
-				},
-				{
-					"name": "saoudrizwan.claude-dev"
-				}
-			],
-			"version": "4.100.3"
 		}
 	}
 }

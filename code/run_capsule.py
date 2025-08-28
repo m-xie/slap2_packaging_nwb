@@ -73,12 +73,19 @@ def main():
     with io_class(str(result_nwb_path), "r+") as nwb_io:
         nwbfile = nwb_io.read()
         with h5py.File(h5_path, "r") as h5:
-            harp_data = harp_utils.extract_harp(harp_path, expected_n_trials=expected_n_trials)
+            harp_data = harp_utils.extract_harp(harp_path, expected_n_trials=get_expected_n_frames(h5))
             add_ophys_to_nwb(nwbfile, h5, rig_json, harp_data)
             add_stim_table(nwbfile, orientations_csv, harp_data)
         nwb_io.write(nwbfile)
         nwb_io.close()
     print(f'Wrote output slap2 nwb to {result_nwb_path}')
+
+
+
+def get_expected_n_frames(h5):
+    trial_num_frames = h5['DMD1']['frame_info']['trial_num_frames']
+    assert len(trial_num_frames) == len(h5['DMD2']['frame_info']['trial_num_frames']), 'DMDs have different numbers of trials'
+    return len(trial_num_frames)
 
 
 def find_slap2_trial_index(time, start_trials, end_trials):
@@ -114,7 +121,7 @@ def add_stim_table(nwbfile, orientations_table, harp_data):
 
     slap2_start_times = harp_data['normalized_slap2_start']
     slap2_end_times = harp_data['normalized_slap2_end']
-    start_gratings_times = harp_data['normalized_start_gratings'][1:] # first time is erroneous (perhaps?)
+    start_gratings_times = harp_data['normalized_start_gratings'] # first time is erroneous (perhaps?)
 
     # We check there are as many gratings presentation as there are timing data in HARP
     if len(gratings_df) != len(start_gratings_times):
@@ -230,10 +237,10 @@ def add_fluorescence(h5, dmd_name, roi_table, ophys_mod, harp_data):
     print("temporal sources:", temporal_sources, temporal_sources.keys())
     f0_data = temporal_sources['F0'][()]
     dff_data = temporal_sources['dFF'][()]
-    print(dmd_group, dmd_group.keys())
-    trial_start_idxs = dmd_group['frame_info']['trial_start_idxs'][()]
-    timestamps = harp_utils.get_concatenated_timestamps(f0_data, trial_start_idxs, harp_data)
+    trial_num_frames = dmd_group['frame_info']['trial_num_frames'][()]
+    timestamps = harp_utils.get_concatenated_timestamps_from_num_frames(f0_data, trial_num_frames, harp_data)
     assert len(timestamps) == f0_data.shape[0], "Timestamps and fluorescence trace must have same length"
+
     fluorescence = pynwb.ophys.Fluorescence(name=f"Fluorescence_{dmd_name}")
     ophys_mod.add_data_interface(fluorescence)
     rrs_f0 = pynwb.ophys.RoiResponseSeries(
