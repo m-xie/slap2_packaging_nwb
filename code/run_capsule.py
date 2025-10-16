@@ -121,8 +121,10 @@ def add_stim_table(nwbfile, orientations_table, harp_data):
 
     slap2_start_times = harp_data['normalized_slap2_start']
     slap2_end_times = harp_data['normalized_slap2_end']
-    start_gratings_times = harp_data['normalized_start_gratings'] # first time is erroneous (perhaps?)
+    start_gratings_times = harp_data['normalized_start_gratings'][1:] # first time is erroneous (perhaps?)
 
+    print("gratings presentations", len(gratings_df), gratings_df[:10], gratings_df[-10:])
+    print("harp timing", len(start_gratings_times), start_gratings_times[:10], start_gratings_times[-10:])
     # We check there are as many gratings presentation as there are timing data in HARP
     if len(gratings_df) != len(start_gratings_times):
         raise ValueError(f"Mismatch between number of grating presentations {len(gratings_df)} and HARP timing data {len(start_gratings_times)}")
