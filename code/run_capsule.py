@@ -64,6 +64,7 @@ def main():
     rig_json_path = next(asset_path.glob("rig.json"))
     harp_path = next(asset_path.rglob('.harp'))
     orientations_csv = next((asset_path / 'behavior').rglob('orientations_orientations0.csv'))
+    log_csv = next((asset_path / 'behavior').rglob('orientations_logger.csv'))
 
     print('using rig json:', rig_json_path)
     with open(session_json_path, "r") as f:
@@ -75,7 +76,7 @@ def main():
         with h5py.File(h5_path, "r") as h5:
             harp_data = harp_utils.extract_harp(harp_path, expected_n_trials=get_expected_n_frames(h5))
             add_ophys_to_nwb(nwbfile, h5, rig_json, harp_data)
-            add_stim_table(nwbfile, orientations_csv, harp_data)
+            add_stim_table(nwbfile, orientations_csv, log_csv, harp_data)
         nwb_io.write(nwbfile)
         nwb_io.close()
     print(f'Wrote output slap2 nwb to {result_nwb_path}')
@@ -101,7 +102,7 @@ def find_slap2_trial_index(time, start_trials, end_trials):
     return idx
 
 
-def add_stim_table(nwbfile, orientations_table, harp_data):
+def add_stim_table(nwbfile, orientations_table, log_csv, harp_data):
     column_names = [
         'stim_id',
         'delay',
@@ -116,12 +117,13 @@ def add_stim_table(nwbfile, orientations_table, harp_data):
     ]
     gratings_df = pd.read_csv(orientations_table, header=None, names=column_names)
 
-    # csv_log = pd.read_csv(asset_path / 'behavior/orientations_logger.csv')
-    # start_gratings_times_csv = np.array(csv_log.loc[csv_log['Value'] == 'StartGrating', 'Timestamp'].tolist())
+    log_df = pd.read_csv(log_csv)
+    spacebar_time = np.array(log_df.loc[log_df['Value'] == 'SPACEBAR', 'Timestamp'].tolist())[0]
 
     slap2_start_times = harp_data['normalized_slap2_start']
     slap2_end_times = harp_data['normalized_slap2_end']
-    start_gratings_times = harp_data['normalized_start_gratings'][1:] # first time is erroneous (perhaps?)
+    # any gratings before the spacebar are erroneous (digital line is noisy perhaps)
+    start_gratings_times = np.array([t for t in harp_data['normalized_start_gratings'] if t >= spacebar_time])
 
     # We check there are as many gratings presentation as there are timing data in HARP
     if len(gratings_df) != len(start_gratings_times):
