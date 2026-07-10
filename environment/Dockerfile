@@ -1,10 +1,10 @@
-# hash:sha256:05e8f2d681708d4d5852d5a13971aeab231ba96e20829b7fad661a35c0e215fa
+# hash:sha256:8853f4fe761ce1db0e55bddb58e939e121f09714cf8973bb4e0b77774310843e
 ARG REGISTRY_HOST
 FROM $REGISTRY_HOST/codeocean/jupyterlab:3.6.1-miniconda4.12.0-python3.9-ubuntu20.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG GIT_ASKPASS
-COPY git-askpass /
+COPY git-ask-pass /
 
 RUN --mount=type=secret,id=git-access-token \
     GIT_ACCESS_TOKEN="$(cat /run/secrets/git-access-token)" \
@@ -13,11 +13,12 @@ RUN --mount=type=secret,id=git-access-token \
     h5py==3.14.0 \
     harp-python==0.4.1 \
     hdmf-zarr==0.11.2 \
+    matplotlib \
     pynwb==3.1.1 \
     -e git+https://github.com/AllenInstitute/openscope_upload.git@d54ae99620cb81f92cffa75ecf2fe66e9ee2e3b2#egg=openscope-upload
 
 ADD "https://github.com/coder/code-server/releases/download/v4.100.3/code-server-4.100.3-linux-amd64.tar.gz" /.code-server/code-server.tar.gz
-	
+
 RUN cd /.code-server \
     && tar -xvf code-server.tar.gz \
     && rm code-server.tar.gz \

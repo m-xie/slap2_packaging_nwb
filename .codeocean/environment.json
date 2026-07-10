@@ -29,6 +29,9 @@
 					"version": "0.11.2"
 				},
 				{
+					"name": "matplotlib"
+				},
+				{
 					"name": "pynwb",
 					"version": "3.1.1"
 				}
