@@ -10,6 +10,14 @@
 		"pip": {
 			"packages": [
 				{
+					"name": "aind-data-schema",
+					"version": "2.8.1"
+				},
+				{
+					"name": "aind-nwb-utils",
+					"version": "0.2.5"
+				},
+				{
 					"name": "argparse"
 				},
 				{

@@ -2,6 +2,10 @@ import h5py
 import numpy as np
 import pynwb
 import hdmf_zarr
+from aind_nwb_utils import utils as nwb_utils
+from aind_data_schema.components.identifiers import Code
+from aind_data_schema.core.processing import DataProcess, Processing, ProcessStage
+from aind_data_schema_models.process_names import ProcessName
 from datetime import datetime
 from pathlib import Path
 import harp_utils
@@ -16,10 +20,111 @@ import re
 import csv
 import warnings
 import matplotlib.pyplot as plt
+import os
 
 
 data_folder = Path("../data")
 results_folder = Path("../results")
+
+
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ("true", "t"):
+        return True
+    if value.lower() in ("false", "f"):
+        return False
+    raise argparse.ArgumentTypeError("Expected true or false")
+
+
+def write_data_process(
+    session_path,
+    processed_path,
+    nwb_path,
+    output_dir,
+    stimulus_start_time,
+    stimulus_end_time,
+    ophys_start_time,
+    ophys_end_time,
+    packaging_end_time,
+    parameters,
+):
+    """Write provenance for SLAP2 synchronization and NWB packaging."""
+    code_version = os.getenv("VERSION", "")
+    code_url = "https://github.com/AllenNeuralDynamics/aind-slap2-nwb-packaging"
+    experimenters = ["AIND Scientific Computing"]
+
+    def capsule_code(process_parameters):
+        return Code(
+            url=code_url,
+            name="SLAP2 NWB packaging",
+            version=code_version,
+            run_script=Path("code/run_capsule.py"),
+            language="Python",
+            parameters=process_parameters,
+        )
+
+    synchronization = DataProcess(
+        process_type=ProcessName.OTHER,
+        name="SLAP2-HARP synchronization",
+        stage=ProcessStage.PROCESSING,
+        code=capsule_code({
+            "session_path": str(session_path),
+            "harp_clock_source": "HARP digital and cycle-clock signals",
+        }),
+        experimenters=experimenters,
+        start_date_time=ophys_start_time,
+        end_date_time=ophys_end_time,
+        notes=(
+            "Synchronized SLAP2 fluorescence frames and trials to HARP time, "
+            "including primary and secondary DMD timestamp alignment."
+        ),
+    )
+    stimulus_packaging = DataProcess(
+        process_type=ProcessName.FILE_FORMAT_CONVERSION,
+        name="Stimulus interval NWB packaging",
+        stage=ProcessStage.PROCESSING,
+        code=capsule_code({
+            "session_path": str(session_path),
+            "processed_path": str(processed_path),
+        }),
+        experimenters=experimenters,
+        start_date_time=stimulus_start_time,
+        end_date_time=stimulus_end_time,
+        notes="Converted visual stimulus tables and HARP timestamps to NWB TimeIntervals.",
+    )
+    ophys_packaging = DataProcess(
+        process_type=ProcessName.FILE_FORMAT_CONVERSION,
+        name="SLAP2 ophys NWB packaging",
+        stage=ProcessStage.PROCESSING,
+        code=capsule_code({
+            "processed_path": str(processed_path),
+            "nwb_path": str(nwb_path),
+            **parameters,
+        }),
+        experimenters=experimenters,
+        start_date_time=ophys_start_time,
+        end_date_time=packaging_end_time,
+        output_path=Path(nwb_path).name,
+        notes=(
+            "Packaged SLAP2 imaging planes, ROI segmentation, fluorescence, "
+            "mean images, and synchronized timestamps into NWB."
+        ),
+    )
+    processing = Processing(
+        data_processes=[stimulus_packaging, synchronization, ophys_packaging],
+        dependency_graph={
+            stimulus_packaging.name: [],
+            synchronization.name: [],
+            ophys_packaging.name: [
+                stimulus_packaging.name,
+                synchronization.name,
+            ],
+        },
+    )
+    output_path = Path(output_dir) / "slap2-nwb-packaging_data_process.json"
+    with open(output_path, "w") as f:
+        json.dump(json.loads(processing.model_dump_json()), f, indent=4)
 
 
 def main():
@@ -27,6 +132,7 @@ def main():
     parser.add_argument("--input_session_dir", type=str, default="slap2_session")
     parser.add_argument("--input_processed_dir", type=str, default="slap2_processed")
     parser.add_argument("--input_nwb_dir", type=str, default=f'nwb')
+    parser.add_argument("--use_input_nwb", type=parse_bool, default=False)
     parser.add_argument("--expected_n_trials", type=int, default=None)
     parser.add_argument("--rf_onset_delay", type=float, default=0.2,
                         help="Onset delay in seconds for RF response windows (default: 0.2)")
@@ -40,34 +146,42 @@ def main():
     processed_path = Path(args.input_processed_dir)
     if not processed_path.is_absolute():
         processed_path = data_folder / processed_path
-    print("SESSION PATH", session_path)
-    print("PROCESSED PATH", processed_path)
-
-    print('INPUT NWB DIR', input_nwb_dir)
-    assert input_nwb_dir.exists(), "Input NWB dir does not exist"
-    nwb_files = [p for p in input_nwb_dir.iterdir() if p.name.endswith(".nwb") or p.name.endswith(".nwb.zarr")]
-    assert len(nwb_files) == 1, f"Attach one base NWB file data at a time. {len(nwb_files)} found"
-    input_nwb_path = nwb_files[0]
-    print('INPUT NWB', input_nwb_path)
+    with open(session_path / "data_description.json", "r") as f:
+        session_name = json.load(f)["name"]
+    with open(processed_path / "data_description.json", "r") as f:
+        processed_session_name = json.load(f)["name"]
+    print("SESSION PATH", session_path, "SESSION NAME", session_name)
+    print("PROCESSED PATH", processed_path, "SESSION NAME", processed_session_name)
 
     for file in results_folder.iterdir():
         shutil.rmtree(file)
     print(f'cleared results folder: {list(results_folder.iterdir())}')
 
-    # determine if file is zarr or hdf5, and copy it to results
-    result_nwb_path = results_folder / input_nwb_path.name
-    if input_nwb_path.is_dir():
-        assert (input_nwb_path / ".zattrs").is_file(), f"{input_nwb_path.name} is not a valid Zarr folder"
-        NWB_BACKEND = "zarr"
-        io_class = hdmf_zarr.NWBZarrIO
-        shutil.copytree(input_nwb_path, result_nwb_path, dirs_exist_ok=True)
-    else:
-        NWB_BACKEND = "hdf5"
-        io_class = pynwb.NWBHDF5IO
-        shutil.copyfile(input_nwb_path, result_nwb_path)
-    print(f"NWB backend: {NWB_BACKEND}")
+    if args.use_input_nwb:
+        print('INPUT NWB DIR', input_nwb_dir)
+        assert input_nwb_dir.exists(), "Input NWB dir does not exist"
+        nwb_files = [p for p in input_nwb_dir.iterdir() if p.name.endswith(".nwb") or p.name.endswith(".nwb.zarr")]
+        assert len(nwb_files) == 1, f"Attach one base NWB file data at a time. {len(nwb_files)} found"
+        input_nwb_path = nwb_files[0]
+        print('INPUT NWB', input_nwb_path)
 
-    nwb_path = results_folder / f"{session_path.name}.nwb"
+        # determine if file is zarr or hdf5, and copy it to results
+        result_nwb_path = results_folder / input_nwb_path.name
+        if input_nwb_path.is_dir():
+            assert (input_nwb_path / ".zattrs").is_file(), f"{input_nwb_path.name} is not a valid Zarr folder"
+            io_class = hdmf_zarr.NWBZarrIO
+            shutil.copytree(input_nwb_path, result_nwb_path, dirs_exist_ok=True)
+        else:
+            io_class = pynwb.NWBHDF5IO
+            shutil.copyfile(input_nwb_path, result_nwb_path)
+    else:
+        io_class = hdmf_zarr.NWBZarrIO
+        nwb_file_obj = nwb_utils.create_base_nwb_file(session_path)
+        result_nwb_path = results_folder / f"{nwb_file_obj.session_id}.nwb"
+        with io_class(str(result_nwb_path), "w") as nwb_io:
+            nwb_io.write(nwb_file_obj)
+
+    print("Using NWB:", result_nwb_path)
     instrument_json_path = next(session_path.glob("instrument.json"))
     acquisition_json_path = next(session_path.glob("acquisition.json"))
     harp_path = next(session_path.rglob('*.harp'))
@@ -89,11 +203,32 @@ def main():
             qc_folder = results_folder / 'qc'
             qc_folder.mkdir(exist_ok=True)
             (qc_folder / 'syncing').mkdir(exist_ok=True)
+            stimulus_start_time = datetime.now().astimezone()
             add_stim_table(nwbfile, orientations_csv, log_csv, harp_data)
+            stimulus_end_time = datetime.now().astimezone()
+            ophys_start_time = datetime.now().astimezone()
             add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_json, harp_data, session_path, qc_folder)
+            ophys_end_time = datetime.now().astimezone()
         nwb_io.write(nwbfile)
+    packaging_end_time = datetime.now().astimezone()
     slap2_rf_qc.compute_receptive_field_qc(qc_folder, result_nwb_path, onset_delay=rf_onset_delay)
     stim_tuning_qc.compute_stim_tuning_qc(qc_folder, result_nwb_path)
+    write_data_process(
+        session_path=session_path,
+        processed_path=processed_path,
+        nwb_path=result_nwb_path,
+        output_dir=results_folder,
+        stimulus_start_time=stimulus_start_time,
+        stimulus_end_time=stimulus_end_time,
+        ophys_start_time=ophys_start_time,
+        ophys_end_time=ophys_end_time,
+        packaging_end_time=packaging_end_time,
+        parameters={
+            "use_input_nwb": args.use_input_nwb,
+            "expected_n_trials": expected_n_trials,
+            "rf_onset_delay": rf_onset_delay,
+        },
+    )
     print(f'Wrote output slap2 nwb to {result_nwb_path}')
 
 
@@ -658,6 +793,9 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
 
     print(f"{dmd_name}: trial_num_frames = {trial_num_frames}")
     print(f"{dmd_name}: trial_num_cycles = {trial_num_cycles}")
+    frame_line_idxs, line_index_corrections = slap2_sync.normalize_continued_trial_line_indices(
+        frame_line_idxs, trial_num_frames, plane_name=dmd_name
+    )
 
     if int(dmd_num) == 1:
         timestamps, out_maps, sync_qc_values = slap2_sync.get_slap2_primary_plane_timestamps(
@@ -675,6 +813,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
             'timestamps': timestamps,
             'trial_line_time_maps': out_maps,
             'sync_qc_values': sync_qc_values,
+            'line_index_corrections': line_index_corrections,
             'acquisition_prefix': filtered['acquisition_prefix'],
             'excluded_trial_count': filtered['excluded_trial_count'],
         }
@@ -688,6 +827,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
             'frame_line_idxs': frame_line_idxs,
             'trial_num_frames': trial_num_frames,
             'timestamps': timestamps,
+            'line_index_corrections': line_index_corrections,
             'acquisition_prefix': filtered['acquisition_prefix'],
             'excluded_trial_count': filtered['excluded_trial_count'],
         }

@@ -1,4 +1,4 @@
-# hash:sha256:04490efc6deb07afce520c730d9b4cc0461c9dcbf9c7ba6a2a69f08789344ccc
+# hash:sha256:dfb445c698ebb26fa8c1ddce79aad2f3f0dfe258ab9e74c324084681cc171fd8
 ARG REGISTRY_HOST
 FROM $REGISTRY_HOST/codeocean/code-server-python-extensions-pack:code-server4.129.0python3.12.4codeocean-mcp-serveruvpyreflyetc
 
@@ -9,6 +9,8 @@ COPY git-ask-pass /
 RUN --mount=type=secret,id=git-access-token \
     GIT_ACCESS_TOKEN="$(cat /run/secrets/git-access-token)" \
     pip install -U --no-cache-dir \
+    aind-data-schema==2.8.1 \
+    aind-nwb-utils==0.2.5 \
     argparse \
     h5py==3.14.0 \
     harp-python==0.4.1 \

@@ -77,7 +77,7 @@ import numpy as np
 # Trial-based sessions consist of multiple trials separated by long inter-trial
 # pauses (typically hundreds of milliseconds) during which imaging stops
 # entirely. These pauses appear in the HARP data as abnormally large gaps
-# between consecutive cycle start times. Gap detection exploits this contrastI
+# between consecutive cycle start times. Gap detection exploits this contrast
 # to segment the cycle stream into per-trial groups without needing to count
 # cycles precisely:
 #
@@ -122,37 +122,44 @@ import numpy as np
 #
 #        timestamps[mask_c] = linspace(cycle_starts[c], cycle_starts[c+1], n_c)
 #
-#      If the cycle count from step 3 does not match the detected HARP cycle
-#      count (a sign of pre-bug-fix data or metadata mismatch), fall back to
-#      a single linspace spanning the full trial.
+#      effective_lpc is defined from the detected HARP cycle count, so ordinary
+#      positive line indices are distributed across exactly that many cycle
+#      buckets. A trial-span linspace remains as a defensive fallback if those
+#      derived bucket counts ever disagree.
+#
+#      A trial with only one detected cycle has no following HARP cycle start
+#      from which to infer its duration. The current implementation therefore
+#      uses a zero-duration final cycle. Such a trial cannot produce strictly
+#      increasing secondary timestamps and is not supported for secondary-plane
+#      alignment.
 #
 #
 # --- Secondary plane alignment algorithm ---
 #
 #   1. Run get_slap2_primary_plane_timestamps to obtain primary_timestamps and
-#      trial_line_time_maps (the per-trial control points produced in step 3b
-#      of the primary alignment).
+#      trial_line_time_maps (the per-trial cycle-boundary control points produced
+#      during primary alignment).
 #
 #   2. For each trial, the primary alignment produces a set of (line, time)
-#      control points anchored to the HARP cycle boundaries:
+#      control points. Each HARP cycle start is paired with the estimated scan
+#      line where that cycle begins:
 #
-#        for each primary plane cycle c:
-#            control_line_idxs[2c]    = min scan line of primary samples in c
-#            control_timestamps[2c]   = cycle_starts[c]
-#            control_line_idxs[2c+1]  = max scan line of primary samples in c
-#            control_timestamps[2c+1] = cycle_starts[c+1]  (or estimated for last)
+#        control_line_idxs[c]  = 1 + c * effective_lpc
+#        control_timestamps[c] = cycle_starts[c]
 #
-#      These interleaved pairs form a monotonically non-decreasing (line, time)
-#      series covering the full trial.
+#      One final boundary is appended after the last cycle using the mean HARP
+#      cycle period. Representing each boundary once produces strictly increasing
+#      line and time coordinates and avoids flat intervals between cycles.
 #
 #   3. Interpolate secondary plane timestamps from the control points:
 #
 #        secondary_timestamps = interp(secondary_line_idxs,
 #                                      control_line_idxs, control_timestamps)
 #
-#      Secondary samples whose scan line indices fall outside the primary
-#      plane's sampled line range are clamped (np.interp default) with a
-#      warning.
+#      Secondary samples whose scan line indices fall outside the estimated
+#      cycle-boundary range are clamped (np.interp default) with a warning.
+#      Each non-empty trial is then required to have strictly increasing
+#      timestamps; equal or decreasing values raise ValueError.
 #
 #
 # --- Known data quality issues ---
@@ -171,10 +178,12 @@ import numpy as np
 # If a large discrepancy is observed in sanity-check warnings, the metadata field
 # being read should be verified.
 #
-# frame_line_idxs not resetting to 1: validate_inputs warns if any trial's first
-# scan line index is not 1. This most commonly affects the last trial in a
-# session and does not prevent timestamp computation, but reduces accuracy of
-# effective_lpc for that trial.
+# frame_line_idxs not resetting to 1: some processed summaries contain a trial
+# whose scan-line counter continued from the previous trial. The caller should
+# run normalize_continued_trial_line_indices independently for each plane before
+# either timestamp entry point. In-range non-1 starts are retained because they
+# may represent valid partial trials. validate_inputs warns about any remaining
+# non-1 starts.
 #
 # Signal starts high: if the HARP square wave is already high at the first
 # recorded sample (i.e. recording began mid-cycle), there is no rising edge at
@@ -184,6 +193,9 @@ import numpy as np
 #
 #
 # --- Entry points ---
+#
+#   normalize_continued_trial_line_indices(...)
+#       -> normalized_frame_line_idxs, correction_records
 #
 #   get_slap2_primary_plane_timestamps(...)
 #       -> primary_timestamps, trial_line_time_maps, sync_qc_values
@@ -439,8 +451,8 @@ def assign_cycles_by_gap_detection(
     inter-trial gap detection.
 
     After segmenting, each trial's detected cycle count is compared against the
-    estimate from get_expected_cycle_count() as a sanity check. A mismatch
-    beyond 10% triggers a warning but does not abort.
+    estimate from get_expected_cycle_count() as a sanity check. Any mismatch
+    triggers a warning but does not abort.
 
     Parameters
     ----------
@@ -628,34 +640,130 @@ def assign_samples_to_cycles(frame_line_idxs_chunk, lines_per_cycle):
     return np.ceil(frame_line_idxs_chunk / lines_per_cycle).astype(int)
 
 
+def normalize_continued_trial_line_indices(
+    frame_line_idxs, trial_num_frames, plane_name="SLAP2"
+):
+    """Fix a scan-line counter that clearly failed to reset between trials.
+
+    ``frame_line_idxs`` should normally restart at 1 for each trial. For
+    example, three trials might look like this::
+
+        expected:  [1, 30, 60, 100] [1, 30, 60, 100] [1, 30, 60, 100]
+
+    Occasionally the counter continues into the next trial instead::
+
+        observed:  [1, 30, 60, 100] [101, 130, 160, 200] [1, 30, 60, 100]
+
+    The samples still belong to the correct trials because ``trial_num_frames``
+    defines the trial boundaries. Only the second trial's line coordinates are
+    wrong. This function subtracts 100 from that trial to restore::
+
+        corrected: [1, 30, 60, 100] [1, 30, 60, 100] [1, 30, 60, 100]
+
+    This matters for both planes. A bad primary-plane index can distort cycle
+    assignment and the line-to-time map. A bad secondary-plane index can fall
+    outside that map, causing many samples to receive the same clamped timestamp.
+
+    The function only corrects clear cases. It first estimates a normal trial's
+    maximum index from trials that start at 1. It then rebases a trial only when
+    its indices increase normally but its first index is already beyond that
+    maximum. A trial that starts above 1 but remains inside the normal range is
+    left alone because it may be a valid partial trial.
+
+    Parameters
+    ----------
+    frame_line_idxs : np.ndarray
+        Concatenated scan-line indices for one plane.
+    trial_num_frames : np.ndarray
+        Number of samples in each trial.
+    plane_name : str
+        Plane label included in correction messages.
+
+    Returns
+    -------
+    normalized : np.ndarray
+        A copy of ``frame_line_idxs`` with clear continued-counter trials
+        rebased to start at 1.
+    corrections : list of dict
+        One diagnostic record per corrected trial. Trial numbers are 1-based.
+    """
+    frame_line_idxs = np.asarray(frame_line_idxs)
+    trial_num_frames = np.asarray(trial_num_frames)
+    if int(np.sum(trial_num_frames)) != len(frame_line_idxs):
+        raise ValueError(
+            f"sum(trial_num_frames) = {np.sum(trial_num_frames)} does not equal "
+            f"len(frame_line_idxs) = {len(frame_line_idxs)}."
+        )
+
+    frame_boundaries = np.concatenate([[0], np.cumsum(trial_num_frames)])
+    reference_maxima = []
+    for i, n_frames in enumerate(trial_num_frames):
+        if n_frames == 0:
+            continue
+        trial_lines = frame_line_idxs[frame_boundaries[i]:frame_boundaries[i + 1]]
+        if trial_lines[0] == 1 and np.all(np.diff(trial_lines) >= 0):
+            reference_maxima.append(float(trial_lines[-1]))
+
+    if not reference_maxima:
+        warnings.warn(
+            f"{plane_name}: cannot detect continued trial line indices because "
+            f"no non-empty monotone trial starts at 1. No indices were changed."
+        )
+        return frame_line_idxs.copy(), []
+
+    normal_trial_max = float(np.median(reference_maxima))
+    normalized = frame_line_idxs.copy()
+    corrections = []
+    for i, n_frames in enumerate(trial_num_frames):
+        if n_frames == 0:
+            continue
+        start = frame_boundaries[i]
+        stop = frame_boundaries[i + 1]
+        trial_lines = normalized[start:stop]
+        if trial_lines[0] <= normal_trial_max or not np.all(np.diff(trial_lines) >= 0):
+            continue
+
+        original_first = int(trial_lines[0])
+        original_last = int(trial_lines[-1])
+        offset = original_first - 1
+        normalized[start:stop] = trial_lines - offset
+        corrected_last = int(normalized[stop - 1])
+        correction = {
+            'trial_number': i + 1,
+            'offset': offset,
+            'original_range': (original_first, original_last),
+            'corrected_range': (1, corrected_last),
+            'normal_trial_max': normal_trial_max,
+        }
+        corrections.append(correction)
+        print(
+            f"{plane_name} TRIAL LINE-INDEX ISSUE: trial {i + 1} started at "
+            f"{original_first}, beyond the normal trial-local maximum "
+            f"{normal_trial_max:.0f}; the scan-line counter appears not to have "
+            f"reset. Subtracted offset {offset} from all {int(n_frames)} samples, "
+            f"changing range [{original_first}, {original_last}] to "
+            f"[1, {corrected_last}]."
+        )
+
+    return normalized, corrections
+
+
 def _build_trial_line_time_map(
-    trial_cycle_starts,
-    primary_trial_line_idxs, sample_cycle_idxs,
-    effective_lpc, n_detected_cycles
+    trial_cycle_starts, effective_lpc, n_detected_cycles
 ):
     """
-    Build interleaved (scan_line_idx, timestamp) control points for one trial.
+    Build one line-to-time control point at each scanner cycle boundary.
 
-    For each cycle, the minimum and maximum scan line indices among primary plane
-    samples in that cycle are paired with the cycle's start timestamp and the
-    next cycle's start timestamp (i.e. cycle_starts[c] and cycle_starts[c+1]).
-    For the final cycle, the end is estimated from the mean cycle period.
-    Interleaving these per-cycle pairs produces a monotonically non-decreasing
-    array of (line, time) control points characterising the piecewise-linear
-    relationship between scan line position and absolute time within the trial.
-
-    If a cycle contains no primary plane samples, its scan line boundaries are
-    estimated from effective_lpc and a warning is emitted.
+    Each HARP cycle start is paired with the estimated scan line where that
+    cycle begins. One final boundary is added using the mean cycle period. This
+    represents a boundary shared by adjacent cycles only once, avoiding the
+    flat time intervals produced when one cycle's last sampled line and the
+    next cycle's first sampled line are both assigned the same timestamp.
 
     Parameters
     ----------
     trial_cycle_starts : np.ndarray
         HARP timestamps of each cycle's rising edge within this trial.
-    primary_trial_line_idxs : np.ndarray
-        Scan line indices (1-based) of primary plane samples in this trial.
-    sample_cycle_idxs : np.ndarray
-        1-based cycle assignment for each element of primary_trial_line_idxs,
-        as returned by assign_samples_to_cycles.
     effective_lpc : float
         Average scan lines per cycle for this trial
         (= primary_trial_line_idxs.max() / n_detected_cycles).
@@ -665,47 +773,20 @@ def _build_trial_line_time_map(
     Returns
     -------
     control_line_idxs : np.ndarray
-        Monotonically non-decreasing scan line indices of the control points.
-        Length == 2 * n_detected_cycles.
+        Strictly increasing estimated cycle-boundary line indices.
+        Length == n_detected_cycles + 1.
     control_timestamps : np.ndarray
-        HARP timestamps corresponding to each control point.
-        Length == 2 * n_detected_cycles.
+        HARP timestamps corresponding to each cycle boundary.
+        Length == n_detected_cycles + 1.
     """
-    # Derive end time for each cycle: start of the next cycle, or estimated
-    # from the mean period for the final cycle.
     if n_detected_cycles > 1:
         mean_cycle_period = float(np.mean(np.diff(trial_cycle_starts)))
     else:
         mean_cycle_period = 0.0
-    cycle_period_ends = np.append(
-        trial_cycle_starts[1:], trial_cycle_starts[-1] + mean_cycle_period
+    control_line_idxs = 1.0 + np.arange(n_detected_cycles + 1) * effective_lpc
+    control_timestamps = np.append(
+        trial_cycle_starts, trial_cycle_starts[-1] + mean_cycle_period
     )
-
-    control_line_idxs = np.empty(2 * n_detected_cycles)
-    control_timestamps = np.empty(2 * n_detected_cycles)
-
-    n_empty_cycles = 0
-    for c in range(1, n_detected_cycles + 1):
-        cycle_sample_lines = primary_trial_line_idxs[sample_cycle_idxs == c]
-
-        if len(cycle_sample_lines) == 0:
-            n_empty_cycles += 1
-            cycle_first_line = (c - 1) * effective_lpc + 1.0
-            cycle_last_line = c * effective_lpc
-        else:
-            cycle_first_line = float(cycle_sample_lines.min())
-            cycle_last_line = float(cycle_sample_lines.max())
-
-        control_line_idxs[2 * (c - 1)]     = cycle_first_line
-        control_line_idxs[2 * (c - 1) + 1] = cycle_last_line
-        control_timestamps[2 * (c - 1)]     = trial_cycle_starts[c - 1]
-        control_timestamps[2 * (c - 1) + 1] = cycle_period_ends[c - 1]
-
-    if n_empty_cycles > 0:
-        warnings.warn(
-            f"{n_empty_cycles}/{n_detected_cycles} cycles had no primary plane samples; "
-            f"scan line boundaries estimated from effective_lpc."
-        )
 
     return control_line_idxs, control_timestamps
 
@@ -742,10 +823,15 @@ def build_timestamps(trial_cycle_groups, trial_num_frames, primary_frame_line_id
     interpolated uniformly between that cycle's own HARP start and end timestamp.
     This uses the full precision of the HARP cycle clock.
 
-    Falls back to trial-span interpolation (single np.linspace across the whole
-    trial) only when the number of cycle buckets derived from line indices does
-    not match the number of HARP clock cycles detected for that trial — which
-    indicates pre-bug-fix data or another cycle count mismatch.
+    ``effective_lpc`` is derived from the detected HARP cycle count, so ordinary
+    positive line indices span exactly that many cycle buckets. A trial-span
+    interpolation remains as a defensive fallback if the derived bucket count
+    nevertheless differs.
+
+    The final cycle duration is estimated from the mean period between detected
+    cycle starts. With only one detected cycle there is no measured period, so
+    the current estimate is zero. That case cannot support strictly increasing
+    secondary-plane timestamps.
 
     Also builds a per-trial scan-line-to-time map (via _build_trial_line_time_map)
     for use by get_slap2_secondary_plane_timestamps.
@@ -838,13 +924,10 @@ def build_timestamps(trial_cycle_groups, trial_num_frames, primary_frame_line_id
                 )
             all_timestamps.append(trial_timestamps)
 
-            # Build the line→time control point map for secondary plane alignment.
-            # Control points are anchored at the first and last primary plane sample
-            # scan line in each cycle, paired with the cycle boundary timestamps.
+            # Build one control point per scanner cycle boundary so interpolation
+            # remains continuous and strictly increasing between HARP starts.
             control_line_idxs, control_timestamps = _build_trial_line_time_map(
-                trial_cycle_starts,
-                primary_trial_line_idxs, sample_cycle_idxs,
-                effective_lpc, n_detected_cycles
+                trial_cycle_starts, effective_lpc, n_detected_cycles
             )
             trial_line_time_maps.append((control_line_idxs, control_timestamps))
         else:
@@ -919,6 +1002,11 @@ def get_slap2_primary_plane_timestamps(
     sample. Also produces per-trial scan-line-to-time maps required to align the
     secondary plane via get_slap2_secondary_plane_timestamps.
 
+    Call ``normalize_continued_trial_line_indices`` on this plane's line indices
+    before calling this function. The primary and secondary planes must each be
+    normalized independently because their counters can fail to reset on
+    different trials.
+
     The alignment strategy depends on session type:
 
     - Continuous (single-trial) session:
@@ -932,6 +1020,11 @@ def get_slap2_primary_plane_timestamps(
         2. (Fallback) Line-count: if gap detection fails, estimate cycles per
            trial from scan line indices (assign_cycles_by_line_count). May be
            unreliable for pre-bug-fix data; a warning is emitted in that case.
+
+    Trials with one detected HARP cycle do not provide enough information to
+    estimate that cycle's duration. The current implementation gives such a
+    trial zero duration; its line-to-time map is unsuitable for secondary-plane
+    alignment.
 
     Parameters
     ----------
@@ -1105,6 +1198,12 @@ def get_slap2_secondary_plane_timestamps(
     samples are aligned by interpolating their scan line indices onto this mapping
     using np.interp.
 
+    Call ``normalize_continued_trial_line_indices`` on the secondary plane's
+    line indices before calling this function. The supplied maps must come from
+    primary indices that were normalized independently before primary alignment.
+    A non-empty secondary trial requires at least two distinct boundary times;
+    equal or decreasing interpolated timestamps raise ``ValueError``.
+
     Parameters
     ----------
     secondary_frame_line_idxs : np.ndarray
@@ -1183,6 +1282,13 @@ def get_slap2_secondary_plane_timestamps(
         trial_secondary_timestamps = np.interp(
             secondary_trial_line_idxs, control_line_idxs, control_timestamps
         )
+        timestamp_diffs = np.diff(trial_secondary_timestamps)
+        if np.any(timestamp_diffs <= 0):
+            raise ValueError(
+                f"Trial {i}: secondary timestamp interpolation produced "
+                f"{int(np.sum(timestamp_diffs == 0))} equal and "
+                f"{int(np.sum(timestamp_diffs < 0))} decreasing adjacent values."
+            )
         all_secondary_timestamps.append(trial_secondary_timestamps)
 
     secondary_timestamps = np.concatenate(all_secondary_timestamps)
@@ -1217,7 +1323,8 @@ def plot_slap2_inputs_qc(
         [0,2] Cycle periods over time (scatter with threshold)
       Row 1 — Frame line indices:
         [1,0] Frame line index ramp (first 5 trials)
-        [1,1] Frame line index value distribution (histogram, all trials)
+        [1,1] First frame line index per trial (histogram)
+        [1,2] Final frame line index per trial (histogram)
       Row 2 — Per-trial frame counts:
         [2,0] Primary frames per trial (line plot)
         [2,1] Secondary frames per trial (line plot, orange; if provided)
@@ -1437,7 +1544,7 @@ def _plot_sync_qc_row0_cycle_detection(
     if is_gap_detection:
         ax.set_title('Cycles per trial\n(gap-detected vs. predicted)')
     else:
-        ax.set_title(f'Cycles per trial\n(trivial \u2014 {segmentation_method_qc or "unknown"} used)')
+        ax.set_title(f'Cycles per trial\n({segmentation_method_qc or "unknown"} assignment)')
     if n_trials > 30:
         ax.set_xticks([])
 
@@ -1451,7 +1558,7 @@ def _plot_sync_qc_row0_cycle_detection(
         if is_gap_detection:
             ax.set_title('Cycle count discrepancy per trial\n(gap-detected \u2212 predicted)')
         else:
-            ax.set_title(f'Cycle count discrepancy\n(trivial \u2014 {segmentation_method_qc or "unknown"} used)')
+            ax.set_title(f'Cycle count discrepancy\n({segmentation_method_qc or "unknown"} assignment)')
         if n_trials > 30:
             ax.set_xticks([])
     else:
