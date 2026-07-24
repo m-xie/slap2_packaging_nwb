@@ -1,6 +1,6 @@
 {
 	"version": 1,
-	"base_image": "codeocean/jupyterlab:3.6.1-miniconda4.12.0-python3.9-ubuntu20.04",
+	"base_image": "codeocean/code-server-python-extensions-pack:code-server4.129.0python3.12.4codeocean-mcp-serveruvpyreflyetc",
 	"options": {
 		"registry_host_arg": true,
 		"git_ask_pass": true,
@@ -29,38 +29,20 @@
 					"version": "0.11.2"
 				},
 				{
-					"name": "matplotlib"
+					"name": "matplotlib",
+					"version": "3.9.4"
 				},
 				{
 					"name": "pynwb",
 					"version": "3.1.1"
+				},
+				{
+					"name": "pyyaml",
+					"version": "6.0.3"
 				}
 			],
 			"options": {},
 			"pre_install_options": {}
-		},
-		"vscode": {
-			"packages": [
-				{
-					"name": "continue.continue"
-				},
-				{
-					"name": "ms-python.python"
-				},
-				{
-					"name": "ms-toolsai.jupyter"
-				},
-				{
-					"name": "reageyao.biosyntax"
-				},
-				{
-					"name": "reditorsupport.r"
-				},
-				{
-					"name": "saoudrizwan.claude-dev"
-				}
-			],
-			"version": "4.100.3"
 		}
 	}
 }

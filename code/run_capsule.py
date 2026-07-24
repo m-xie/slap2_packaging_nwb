@@ -7,12 +7,14 @@ from pathlib import Path
 import harp_utils
 import slap2_synching as slap2_sync
 import slap2_receptive_fields_qc as slap2_rf_qc
+import stim_tuning_qc
 import json
 import pandas as pd
 import argparse
 import shutil
 import re
 import csv
+import warnings
 import matplotlib.pyplot as plt
 
 
@@ -32,8 +34,12 @@ def main():
     expected_n_trials = args.expected_n_trials
     rf_onset_delay = args.rf_onset_delay
     input_nwb_dir = data_folder / Path(args.input_nwb_dir)
-    session_path = data_folder / Path(args.input_session_dir)
-    processed_path = data_folder / Path(args.input_processed_dir)
+    session_path = Path(args.input_session_dir)
+    if not session_path.is_absolute():
+        session_path = data_folder / session_path
+    processed_path = Path(args.input_processed_dir)
+    if not processed_path.is_absolute():
+        processed_path = data_folder / processed_path
     print("SESSION PATH", session_path)
     print("PROCESSED PATH", processed_path)
 
@@ -87,6 +93,7 @@ def main():
             add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_json, harp_data, session_path, qc_folder)
         nwb_io.write(nwbfile)
     slap2_rf_qc.compute_receptive_field_qc(qc_folder, result_nwb_path, onset_delay=rf_onset_delay)
+    stim_tuning_qc.compute_stim_tuning_qc(qc_folder, result_nwb_path)
     print(f'Wrote output slap2 nwb to {result_nwb_path}')
 
 
@@ -367,7 +374,192 @@ def add_image_segmentation(experiment_summary, imaging_plane, dmd_name, image_se
     return roi_table_region
 
 
-def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, slap2_meta_h5, harp_data, trial_line_time_maps=None, primary_qc=None, qc_folder=None, dat_paths=None, plane_key=None):
+def resolve_slap2_acquisition(dat_paths, n_summary_trials):
+    """Resolve the retained acquisition and leading summary trials across all DMDs."""
+    dat_pattern = re.compile(
+        r'^(?P<prefix>.+_(?P<timestamp>\d{8}_\d{6}))_DMD'
+        r'(?P<dmd>\d+)-TRIAL(?P<trial>\d+)\.dat$',
+        re.IGNORECASE,
+    )
+    acquisition_groups = {}
+    for dat_path in dat_paths:
+        match = dat_pattern.match(dat_path.name)
+        if match is None:
+            raise ValueError(
+                f"Unsupported SLAP2 .dat filename format: {dat_path.name}. Expected "
+                f"<label>_YYYYMMDD_HHMMSS_DMD<number>-TRIAL<number>.dat; the label "
+                f"may be any text, such as 'acquisition' or 'activity'."
+            )
+        prefix = match.group('prefix')
+        acquisition_groups.setdefault(prefix, []).append(
+            (int(match.group('dmd')), int(match.group('trial')), dat_path)
+        )
+
+    if not acquisition_groups:
+        raise ValueError("No SLAP2 .dat files were found.")
+    if len(acquisition_groups) > 2:
+        raise ValueError(
+            f"SLAP2 data contains {len(acquisition_groups)} acquisitions "
+            f"({sorted(acquisition_groups)}). Automatic filtering only supports "
+            f"one earlier acquisition followed by one retained acquisition."
+        )
+
+    for prefix, entries in acquisition_groups.items():
+        dmd_trials = [(dmd_num, trial_num) for dmd_num, trial_num, _ in entries]
+        if len(set(dmd_trials)) != len(dmd_trials):
+            raise ValueError(f"Duplicate DMD/trial numbers found within {prefix}.")
+
+    ordered_groups = sorted(
+        acquisition_groups.items(),
+        key=lambda item: datetime.strptime(
+            re.search(r'(\d{8}_\d{6})$', item[0]).group(1), '%Y%m%d_%H%M%S'
+        ),
+    )
+    selected_prefix, selected_entries = ordered_groups[-1]
+
+    if len(ordered_groups) == 1:
+        excluded_trial_count = 0
+    else:
+        excluded_prefix, excluded_entries = ordered_groups[0]
+        excluded_trial_count = max(trial_num for _, trial_num, _ in excluded_entries)
+        retained_trial_count = n_summary_trials - excluded_trial_count
+        if retained_trial_count <= 0:
+            raise ValueError(
+                f"Earlier acquisition {excluded_prefix} reaches trial "
+                f"{excluded_trial_count}, leaving no retained trials in the "
+                f"{n_summary_trials}-trial experiment summary."
+            )
+        if excluded_trial_count >= retained_trial_count:
+            raise ValueError(
+                f"Earlier acquisition {excluded_prefix} is not shorter than retained "
+                f"acquisition {selected_prefix}; automatic excision is unsafe."
+            )
+        warnings.warn(
+            f"Multiple SLAP2 acquisitions detected: earlier {excluded_prefix} "
+            f"(observed through trial {excluded_trial_count}) and later "
+            f"{selected_prefix}. Excluding the first {excluded_trial_count} summary "
+            f"trials and their samples, and using only {selected_prefix} .dat/.meta files.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    retained_trial_count = n_summary_trials - excluded_trial_count
+    selected_trial_numbers = [trial_num for _, trial_num, _ in selected_entries]
+    invalid_trial_numbers = [
+        trial_num for trial_num in selected_trial_numbers
+        if trial_num < 1 or trial_num > retained_trial_count
+    ]
+    if invalid_trial_numbers:
+        raise ValueError(
+            f"Retained acquisition {selected_prefix} has trial numbers outside "
+            f"the retained summary's 1..{retained_trial_count} range: "
+            f"{sorted(set(invalid_trial_numbers))}."
+        )
+
+    observed_retained_span = max(selected_trial_numbers)
+    if observed_retained_span < retained_trial_count:
+        warnings.warn(
+            f"Retained acquisition {selected_prefix} has {retained_trial_count} "
+            f"processed trial slots, but .dat files across all DMDs only reach trial "
+            f"{observed_retained_span}. Assuming the remaining trailing .dat files "
+            f"are missing and retaining all processed trials.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return {
+        'acquisition_prefix': selected_prefix,
+        'excluded_trial_count': excluded_trial_count,
+        'retained_trial_count': retained_trial_count,
+        'highest_dat_trial': observed_retained_span,
+    }
+
+
+def filter_early_short_slap2_acquisition(
+    dmd_num,
+    dat_paths,
+    meta_paths,
+    trial_num_frames,
+    frame_line_idxs,
+    f0_data,
+    df_denoised_data,
+    events_data,
+    acquisition_resolution,
+):
+    """Apply a shared acquisition decision to one DMD's processed arrays and files."""
+    dat_pattern = re.compile(
+        r'^(?P<prefix>.+_(?P<timestamp>\d{8}_\d{6}))_DMD'
+        rf'{int(dmd_num)}-TRIAL(?P<trial>\d+)\.dat$',
+        re.IGNORECASE,
+    )
+    selected_prefix = acquisition_resolution['acquisition_prefix']
+    n_excluded_trials = acquisition_resolution['excluded_trial_count']
+    retained_trial_count = acquisition_resolution['retained_trial_count']
+    selected_entries = []
+    for dat_path in dat_paths:
+        match = dat_pattern.match(dat_path.name)
+        if match is None:
+            raise ValueError(
+                f"Unsupported DMD{dmd_num} .dat filename format: {dat_path.name}. "
+                f"Expected <label>_YYYYMMDD_HHMMSS_DMD{int(dmd_num)}-"
+                f"TRIAL<number>.dat."
+            )
+        if match.group('prefix').lower() == selected_prefix.lower():
+            selected_entries.append((int(match.group('trial')), dat_path))
+
+    selected_trial_numbers = [trial for trial, _ in selected_entries]
+    if len(set(selected_trial_numbers)) != len(selected_trial_numbers):
+        raise ValueError(f"Duplicate trial numbers found within {selected_prefix} for DMD{dmd_num}.")
+    invalid_trial_numbers = [
+        trial for trial in selected_trial_numbers
+        if trial < 1 or trial > retained_trial_count
+    ]
+    if invalid_trial_numbers:
+        raise ValueError(
+            f"Acquisition {selected_prefix} has DMD{dmd_num} trial numbers outside "
+            f"the retained summary's 1..{retained_trial_count} range: "
+            f"{invalid_trial_numbers}."
+        )
+
+    expected_samples = int(np.sum(trial_num_frames))
+    sample_arrays = {
+        'frame_line_idxs': frame_line_idxs,
+        'F0': f0_data,
+        'dF_denoised': df_denoised_data,
+        'events': events_data,
+    }
+    for name, values in sample_arrays.items():
+        if len(values) != expected_samples:
+            raise ValueError(
+                f"DMD{dmd_num} {name} has {len(values)} samples, but trial_num_frames "
+                f"describes {expected_samples}."
+            )
+
+    sample_start = int(np.sum(trial_num_frames[:n_excluded_trials]))
+    selected_meta_paths = [
+        path for path in meta_paths
+        if path.name.lower() == f'{selected_prefix}_DMD{int(dmd_num)}.meta'.lower()
+    ]
+    if len(selected_meta_paths) != 1:
+        raise ValueError(
+            f"Expected exactly one DMD{dmd_num} .meta file for {selected_prefix}, "
+            f"found {len(selected_meta_paths)}."
+        )
+
+    return {
+        'acquisition_prefix': selected_prefix,
+        'excluded_trial_count': n_excluded_trials,
+        'dat_paths': [path for _, path in sorted(selected_entries)],
+        'meta_path': selected_meta_paths[0],
+        'trial_num_frames': trial_num_frames[n_excluded_trials:],
+        'frame_line_idxs': frame_line_idxs[sample_start:],
+        'F0': f0_data[sample_start:],
+        'dF_denoised': df_denoised_data[sample_start:],
+        'events': events_data[sample_start:],
+    }
+
+
+def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, harp_data, trial_line_time_maps=None, primary_qc=None, qc_folder=None, dat_paths=None, plane_key=None, acquisition_resolution=None):
     plane_key = plane_key or dmd_name
     """
     Extract fluorescence traces and compute HARP-aligned timestamps for one SLAP2 DMD plane.
@@ -380,8 +572,9 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, slap2_meta_h5
         DMD number (e.g. '1' or '2').
     experiment_summary : h5py.File
         Open HDF5 file handle for the experiment summary.
-    slap2_meta_h5 : h5py.File
-        Open HDF5 file handle for this DMD's .meta file.
+    meta_paths : list of Path
+        Candidate .meta files for this DMD. The file matching the selected
+        acquisition is chosen during input filtering.
     harp_data : dict
         Dict from harp_utils.extract_harp containing clock signal arrays.
     trial_line_time_maps : list or None
@@ -419,7 +612,36 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, slap2_meta_h5
 
     frame_line_idxs  = dmd_group['frame_info']['frame_line_idxs'][0]
     trial_num_frames = dmd_group['frame_info']['trial_num_frames'][()][0]
-    lines_per_cycle  = slap2_meta_h5['AcquisitionContainer']['ParsePlan']['linesPerCycle'][0]
+    if acquisition_resolution is None:
+        acquisition_resolution = resolve_slap2_acquisition(dat_paths, len(trial_num_frames))
+    filtered = filter_early_short_slap2_acquisition(
+        dmd_num,
+        dat_paths,
+        meta_paths,
+        trial_num_frames,
+        frame_line_idxs,
+        f0_data,
+        df_denoised_data,
+        events_data,
+        acquisition_resolution,
+    )
+    trial_num_frames = filtered['trial_num_frames']
+    frame_line_idxs = filtered['frame_line_idxs']
+    f0_data = filtered['F0']
+    df_denoised_data = filtered['dF_denoised']
+    events_data = filtered['events']
+    dat_paths = filtered['dat_paths']
+
+    print('using slap2 acquisition:', filtered['acquisition_prefix'])
+    print('using slap2 meta file:', filtered['meta_path'])
+    with h5py.File(filtered['meta_path']) as slap2_meta_h5:
+        lines_per_cycle_raw = slap2_meta_h5['AcquisitionContainer']['ParsePlan']['linesPerCycle'][()]
+    lines_per_cycle_arr = np.asarray(lines_per_cycle_raw).squeeze()
+    if lines_per_cycle_arr.size != 1:
+        raise ValueError(
+            f"Expected scalar linesPerCycle but got shape {np.asarray(lines_per_cycle_raw).shape}"
+        )
+    lines_per_cycle = float(lines_per_cycle_arr.item())
 
     print("###: extracted traces with shape:", f0_data.shape)
 
@@ -443,6 +665,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, slap2_meta_h5
             harp_data['slap2_cycle_clock_signal'],
             harp_data['slap2_cycle_clock_times'],
             trial_num_cycles=trial_num_cycles,
+            highest_dat_trial=acquisition_resolution['highest_dat_trial'],
         )
         print(f"PRODUCED {len(timestamps)} SLAP2 TIMESTAMPS for {len(f0_data)} (DMD{dmd_num})")
         plane_qc = {
@@ -452,6 +675,8 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, slap2_meta_h5
             'timestamps': timestamps,
             'trial_line_time_maps': out_maps,
             'sync_qc_values': sync_qc_values,
+            'acquisition_prefix': filtered['acquisition_prefix'],
+            'excluded_trial_count': filtered['excluded_trial_count'],
         }
         return fluorescence, timestamps, out_maps, plane_qc
     else:
@@ -463,6 +688,8 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, slap2_meta_h5
             'frame_line_idxs': frame_line_idxs,
             'trial_num_frames': trial_num_frames,
             'timestamps': timestamps,
+            'acquisition_prefix': filtered['acquisition_prefix'],
+            'excluded_trial_count': filtered['excluded_trial_count'],
         }
         if qc_folder is not None and primary_qc is not None:
             slap2_sync.plot_slap2_sync_qc(
@@ -624,24 +851,59 @@ def add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_j
     trial_line_time_maps = None
     primary_qc = None
     secondary_qc = {}
+    selected_acquisition_prefix = None
+    excluded_trial_count = None
 
+    plane_inputs = []
     for plane in experiment_summary.keys():
         dmd_name, dmd_num = get_dmd_name(plane)
         if not dmd_name:
             continue
-        slap2_meta_path = next(session_path.rglob(f"*DMD{dmd_num}.meta"))
-        print('using slap2 meta file:', slap2_meta_path)
+        meta_paths = list(session_path.rglob(f"*DMD{dmd_num}.meta"))
         dat_paths = list(session_path.rglob(f"*DMD{dmd_num}-TRIAL*.dat"))
+        n_summary_trials = len(experiment_summary[plane]['frame_info']['trial_num_frames'][()][0])
+        plane_inputs.append((plane, dmd_name, dmd_num, meta_paths, dat_paths, n_summary_trials))
+
+    summary_trial_counts = {plane_input[-1] for plane_input in plane_inputs}
+    if len(summary_trial_counts) != 1:
+        raise ValueError(
+            f"DMD experiment summaries have different trial counts: "
+            f"{sorted(summary_trial_counts)}"
+        )
+    all_dat_paths = [
+        dat_path
+        for _, _, _, _, dat_paths, _ in plane_inputs
+        for dat_path in dat_paths
+    ]
+    acquisition_resolution = resolve_slap2_acquisition(
+        all_dat_paths,
+        summary_trial_counts.pop(),
+    )
+
+    for plane, dmd_name, dmd_num, meta_paths, dat_paths, _ in plane_inputs:
         print(f'found {len(dat_paths)} .dat files for DMD{dmd_num}')
         sync_qc_folder = (qc_folder / 'syncing') if qc_folder is not None else None
-        with h5py.File(slap2_meta_path) as slap2_meta_h5:
-            fluorescence, timestamps, out_maps, plane_qc = sync_slap2_fluorescence(
-                dmd_name, dmd_num, experiment_summary, slap2_meta_h5, harp_data,
-                trial_line_time_maps=trial_line_time_maps,
-                primary_qc=primary_qc,
-                qc_folder=sync_qc_folder,
-                dat_paths=dat_paths,
-                plane_key=plane,
+        fluorescence, timestamps, out_maps, plane_qc = sync_slap2_fluorescence(
+            dmd_name, dmd_num, experiment_summary, meta_paths, harp_data,
+            trial_line_time_maps=trial_line_time_maps,
+            primary_qc=primary_qc,
+            qc_folder=sync_qc_folder,
+            dat_paths=dat_paths,
+            plane_key=plane,
+            acquisition_resolution=acquisition_resolution,
+        )
+        if selected_acquisition_prefix is None:
+            selected_acquisition_prefix = plane_qc['acquisition_prefix']
+            excluded_trial_count = plane_qc['excluded_trial_count']
+        elif (
+            plane_qc['acquisition_prefix'] != selected_acquisition_prefix
+            or plane_qc['excluded_trial_count'] != excluded_trial_count
+        ):
+            raise ValueError(
+                f"DMD acquisition filtering disagrees across planes: expected "
+                f"{selected_acquisition_prefix} with {excluded_trial_count} excluded "
+                f"trials, but DMD{dmd_num} selected {plane_qc['acquisition_prefix']} "
+                f"with {plane_qc['excluded_trial_count']} excluded trials."
             )
         if int(dmd_num) == 1:
             trial_line_time_maps = out_maps

@@ -20,6 +20,24 @@
 			"help_text": "Should be the total number of trials (valid and invalid) that the original .mat file contained.",
 			"type": "text",
 			"value_type": "string"
+		},
+		{
+			"id": "batzxVHcn5CTrJqt",
+			"name": "Input Session Dir",
+			"param_name": "input_session_dir",
+			"description": "Directory in which to look for basic session files",
+			"type": "text",
+			"value_type": "string",
+			"default_value": "slap2_session"
+		},
+		{
+			"id": "zlMWdmXc0DBgypDf",
+			"name": "Input Processed Dir",
+			"param_name": "input_processed_dir",
+			"description": "Directory in which to look for source extracted and motion corrected files",
+			"type": "text",
+			"value_type": "string",
+			"default_value": "slap2_processed"
 		}
 	]
 }

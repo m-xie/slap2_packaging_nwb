@@ -1,6 +1,6 @@
-# hash:sha256:8853f4fe761ce1db0e55bddb58e939e121f09714cf8973bb4e0b77774310843e
+# hash:sha256:04490efc6deb07afce520c730d9b4cc0461c9dcbf9c7ba6a2a69f08789344ccc
 ARG REGISTRY_HOST
-FROM $REGISTRY_HOST/codeocean/jupyterlab:3.6.1-miniconda4.12.0-python3.9-ubuntu20.04
+FROM $REGISTRY_HOST/codeocean/code-server-python-extensions-pack:code-server4.129.0python3.12.4codeocean-mcp-serveruvpyreflyetc
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG GIT_ASKPASS
@@ -13,21 +13,7 @@ RUN --mount=type=secret,id=git-access-token \
     h5py==3.14.0 \
     harp-python==0.4.1 \
     hdmf-zarr==0.11.2 \
-    matplotlib \
+    matplotlib==3.9.4 \
     pynwb==3.1.1 \
+    pyyaml==6.0.3 \
     -e git+https://github.com/AllenInstitute/openscope_upload.git@d54ae99620cb81f92cffa75ecf2fe66e9ee2e3b2#egg=openscope-upload
-
-ADD "https://github.com/coder/code-server/releases/download/v4.100.3/code-server-4.100.3-linux-amd64.tar.gz" /.code-server/code-server.tar.gz
-
-RUN cd /.code-server \
-    && tar -xvf code-server.tar.gz \
-    && rm code-server.tar.gz \
-    && ln -s /.code-server/code-server-4.100.3-linux-amd64/bin/code-server /usr/bin/code-server \
-    && mkdir -p /.vscode/extensions
-
-RUN code-server --extensions-dir="/.vscode/extensions" --install-extension continue.continue \
-    && code-server --extensions-dir="/.vscode/extensions" --install-extension ms-python.python \
-    && code-server --extensions-dir="/.vscode/extensions" --install-extension ms-toolsai.jupyter \
-    && code-server --extensions-dir="/.vscode/extensions" --install-extension reageyao.biosyntax \
-    && code-server --extensions-dir="/.vscode/extensions" --install-extension reditorsupport.r \
-    && code-server --extensions-dir="/.vscode/extensions" --install-extension saoudrizwan.claude-dev

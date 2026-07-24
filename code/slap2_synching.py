@@ -355,6 +355,53 @@ def find_inter_trial_gap_indices(inter_cycle_periods, n_expected_trials, gap_mul
     return trial_start_cycle_idxs
 
 
+def reconcile_cycle_clock_trials(
+    cycle_starts,
+    inter_cycle_periods,
+    n_summary_trials,
+    highest_dat_trial,
+    gap_multiplier=5.0,
+):
+    """Remove one corroborated leading HARP cycle group before trial assignment.
+
+    The processed summary supplies the expected trial count, HARP gaps supply
+    candidate trial groups, and the highest present .dat trial number confirms
+    that the selected acquisition reaches the end of the processed summary.
+    No correction is made unless all three sources support exactly one extra
+    leading HARP group.
+    """
+    threshold = gap_multiplier * np.median(inter_cycle_periods)
+    long_gap_positions = np.where(inter_cycle_periods > threshold)[0]
+    n_harp_groups = len(long_gap_positions) + 1
+    reconciliation_qc = {
+        'harp_group_count_before_reconciliation': n_harp_groups,
+        'summary_trial_count': int(n_summary_trials),
+        'highest_dat_trial': highest_dat_trial,
+        'removed_leading_cycle_count': 0,
+    }
+
+    if n_harp_groups == n_summary_trials:
+        return cycle_starts, inter_cycle_periods, reconciliation_qc
+
+    if (
+        n_harp_groups == n_summary_trials + 1
+        and highest_dat_trial == n_summary_trials
+    ):
+        first_real_group_idx = int(long_gap_positions[0] + 1)
+        reconciliation_qc['removed_leading_cycle_count'] = first_real_group_idx
+        warnings.warn(
+            f"HARP contains {n_harp_groups} cycle groups for {n_summary_trials} "
+            f"processed trials, while .dat files reach trial {highest_dat_trial}. "
+            f"Removing the unmatched leading group of {first_real_group_idx} "
+            f"cycle pulses before gap-based trial assignment.",
+            RuntimeWarning,
+        )
+        cycle_starts = cycle_starts[first_real_group_idx:]
+        inter_cycle_periods = np.diff(cycle_starts)
+
+    return cycle_starts, inter_cycle_periods, reconciliation_qc
+
+
 def get_expected_cycle_count(frame_line_idxs_chunk, lines_per_cycle):
     """
     Estimate the number of imaging cycles in a trial from its scan line indices.
@@ -861,7 +908,8 @@ def get_slap2_primary_plane_timestamps(
     slap2_cycle_clock_signal,
     slap2_cycle_clock_times,
     gap_multiplier=5.0,
-    trial_num_cycles=None
+    trial_num_cycles=None,
+    highest_dat_trial=None,
 ):
     """
     Align primary plane SLAP2 fluorescence samples to absolute HARP timestamps.
@@ -911,6 +959,10 @@ def get_slap2_primary_plane_timestamps(
         Where non-zero, used in place of the LPC-based estimate for both the
         gap-detection sanity check and the line-count cycle assignment.
         Trials with a value of 0 fall back to the LPC estimate.
+    highest_dat_trial : int or None
+        Highest trial number present among the selected acquisition's .dat files
+        across all DMDs. Used only to corroborate removal of one unmatched leading
+        HARP cycle group.
 
     Returns
     -------
@@ -938,6 +990,9 @@ def get_slap2_primary_plane_timestamps(
               gap_multiplier * median(inter_cycle_periods).
           'eff_lpc_per_trial_qc'      : np.ndarray of float
               Effective lines-per-cycle per trial: max scan line / detected cycles.
+          'cycle_clock_reconciliation_qc' : dict
+              Counts from the HARP groups, processed summary, and .dat trial span,
+              plus the number of leading cycle pulses removed before assignment.
     """
     validate_inputs(primary_frame_line_idxs, primary_trial_num_frames)
 
@@ -947,6 +1002,13 @@ def get_slap2_primary_plane_timestamps(
     print(f"Primary plane: {len(cycle_starts)} cycles detected from HARP clock.")
 
     n_trials = len(primary_trial_num_frames)
+    cycle_starts, inter_cycle_periods, reconciliation_qc = reconcile_cycle_clock_trials(
+        cycle_starts,
+        inter_cycle_periods,
+        n_trials,
+        highest_dat_trial,
+        gap_multiplier=gap_multiplier,
+    )
     gap_threshold_qc = gap_multiplier * float(np.median(inter_cycle_periods))
 
     # For multi-trial sessions, attempt gap-based segmentation first
@@ -1018,6 +1080,7 @@ def get_slap2_primary_plane_timestamps(
         'segmentation_method_qc': segmentation_method_qc,
         'gap_threshold_qc': gap_threshold_qc,
         'eff_lpc_per_trial_qc': eff_lpc_per_trial_qc,
+        'cycle_clock_reconciliation_qc': reconciliation_qc,
     }
     return primary_timestamps, trial_line_time_maps, sync_qc_values
 

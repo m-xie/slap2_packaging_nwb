@@ -1,36 +1,35 @@
-I think the fix is to make a post install and put this in it: 
 #!/usr/bin/env bash
 set -e
- 
-# install updated version of code-server
-VERSION=4.100.3
-mkdir /.code-server
-cd /.code-server
-curl -fL "https://github.com/coder/code-server/releases/download/v$VERSION/code-server-$VERSION-linux-amd64.tar.gz" \
-  | tar -xz
-ln -s /.code-server/code-server-$VERSION-linux-amd64/bin/code-server  /usr/bin/code-server
-cd -
- 
- 
-# default behavior: extensions are installed here and reinstalled when capsule is rebuilt,
-# alternative: install extensions manually inside capsule filesystem, saved across rebuilds
-install_extensions=true
- 
-if $install_extensions; then
-  mkdir -p /.vscode/extensions
-  code-server --extensions-dir=/.vscode/extensions --install-extension ms-toolsai.jupyter
-  code-server --extensions-dir=/.vscode/extensions --install-extension ms-python.python
-else
-  # move VS code extensions directory into capsule and symlink
-  # (this may cause issues on the first run that will be solved by reloading VS code
-  echo "mkdir -p /root/capsule/.vscode/extensions" >> /root/.profile
-  ln -s /root/capsule/.vscode /.vscode
-  # install extensions manually, or run the below lines in the terminal of cloud workstation
-#   code-server --extensions-dir=/.vscode/extensions --install-extension ms-toolsai.jupyter
-#   code-server --extensions-dir=/.vscode/extensions --install-extension ms-python.python
-#   code-server --extensions-dir=/.vscode/extensions --install-extension detachhead.basedpyright
-fi
 
-pip install h5py
-pip install pynwb
-pip install numpy pandas 
+# install updated version of code-server
+# VERSION=4.100.3
+# mkdir -p /.code-server
+# cd /.code-server
+
+# curl -fL "https://github.com/coder/code-server/releases/download/v$VERSION/code-server-$VERSION-linux-amd64.tar.gz" \
+#   | tar -xz
+
+# ln -sf /.code-server/code-server-$VERSION-linux-amd64/bin/code-server /usr/bin/code-server
+# cd -
+
+# # Persist code-server state in capsule
+# mkdir -p /root/capsule/.local/share
+
+# if [ ! -e /root/.local/share/code-server ]; then
+#     ln -s /root/capsule/.local/share/code-server /root/.local/share/code-server
+# fi
+
+# mkdir -p /root/capsule/.local/share/code-server
+
+# Install extensions into persistent code-server environment
+# code-server --install-extension ms-toolsai.jupyter
+# code-server --install-extension ms-python.python
+# code-server --install-extension detachhead.basedpyright
+# code-server --install-extension GitHub.copilot
+# code-server --install-extension GitHub.copilot-chat
+
+
+# mkdir -p /.vscode/extensions
+# code-server --extensions-dir=/.vscode/extensions --install-extension ms-toolsai.jupyter 
+# code-server --extensions-dir=/.vscode/extensions --install-extension ms-python.python 
+# code-server --extensions-dir=/.vscode/extensions --install-extension meta.pyrefly

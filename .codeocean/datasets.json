@@ -6,12 +6,12 @@
 			"mount": "nwb"
 		},
 		{
-			"id": "14494cf4-9ffb-4879-b3cc-81f702f489dd",
-			"mount": "829704_2025-12-16_11-03-04_processed_2026-06-24_02-10-58"
+			"id": "165e4d5e-44d6-40d6-9c1a-a330e3a1077b",
+			"mount": "slap2_processed"
 		},
 		{
-			"id": "5c5beb4d-7236-49e1-9d4e-53a0ed52d188",
-			"mount": "829704_2025-12-16_11-03-04"
+			"id": "40a974e3-13a4-468c-a06e-7dda15af9c45",
+			"mount": "slap2_session"
 		}
 	]
 }
