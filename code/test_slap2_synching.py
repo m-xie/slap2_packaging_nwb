@@ -3,10 +3,12 @@ import warnings
 from contextlib import redirect_stdout
 from io import StringIO
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 from slap2_synching import (
     _build_trial_line_time_map,
+    _plot_trial_line_normalization,
     get_slap2_secondary_plane_timestamps,
     normalize_continued_trial_line_indices,
     reconcile_cycle_clock_trials,
@@ -97,6 +99,41 @@ class NormalizeContinuedTrialLineIndicesTests(unittest.TestCase):
         np.testing.assert_array_equal(normalized, lines)
         self.assertEqual(corrections, [])
 
+    def test_leaves_large_positive_jump_partial_trial_unchanged(self):
+        counts = np.array([4, 3])
+        lines = np.array([
+            1, 30, 60, 100,
+            5000, 5030, 5060,
+        ])
+
+        normalized, corrections = normalize_continued_trial_line_indices(lines, counts)
+
+        np.testing.assert_array_equal(normalized, lines)
+        self.assertEqual(corrections, [])
+
+    def test_rebases_alternating_local_continuations(self):
+        counts = np.array([4, 4, 4, 4])
+        lines = np.array([
+            1, 54, 107, 160,
+            184, 237, 291, 344,
+            1, 54, 107, 160,
+            185, 238, 291, 345,
+        ])
+
+        normalized, corrections = normalize_continued_trial_line_indices(lines, counts)
+
+        np.testing.assert_array_equal(
+            normalized,
+            np.array([
+                1, 54, 107, 160,
+                1, 54, 108, 161,
+                1, 54, 107, 160,
+                1, 54, 107, 161,
+            ]),
+        )
+        self.assertEqual([item['trial_number'] for item in corrections], [2, 4])
+        self.assertEqual([item['boundary_gap'] for item in corrections], [24, 25])
+
     def test_leaves_nonmonotone_out_of_range_trial_unchanged(self):
         counts = np.array([4, 4, 4])
         lines = np.array([
@@ -142,6 +179,34 @@ class TrialLineTimeMapTests(unittest.TestCase):
         np.testing.assert_allclose(
             timestamps, np.array([1.0, 1.5, 1.96, 2.02, 2.5, 3.0, 3.5, 3.99])
         )
+
+
+class TrialLineNormalizationPlotTests(unittest.TestCase):
+    def test_compares_final_lines_and_highlights_corrections(self):
+        raw = np.array([1, 54, 107, 131, 184])
+        normalized = np.array([1, 54, 107, 1, 54])
+        counts = np.array([3, 2])
+        fig, ax = plt.subplots()
+        self.addCleanup(plt.close, fig)
+
+        _plot_trial_line_normalization(
+            ax,
+            raw,
+            normalized,
+            counts,
+            'DMD1',
+            'steelblue',
+        )
+
+        self.assertEqual(ax.get_yscale(), 'log')
+        self.assertIn('1 corrected trial(s)', ax.get_title())
+        self.assertEqual(len(ax.lines), 2)
+        self.assertEqual(ax.lines[0].get_linestyle(), '-')
+        self.assertEqual(ax.lines[0].get_linewidth(), 0.6)
+        self.assertEqual(ax.lines[1].get_linewidth(), 0.8)
+        self.assertEqual(ax.lines[1].get_dash_capstyle(), 'round')
+        self.assertEqual(len(ax.collections), 0)
+        self.assertEqual(len(ax.texts), 1)
 
 
 if __name__ == '__main__':

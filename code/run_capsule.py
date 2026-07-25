@@ -153,8 +153,11 @@ def main():
     print("SESSION PATH", session_path, "SESSION NAME", session_name)
     print("PROCESSED PATH", processed_path, "SESSION NAME", processed_session_name)
 
-    for file in results_folder.iterdir():
-        shutil.rmtree(file)
+    for entry in results_folder.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
     print(f'cleared results folder: {list(results_folder.iterdir())}')
 
     if args.use_input_nwb:
@@ -793,6 +796,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
 
     print(f"{dmd_name}: trial_num_frames = {trial_num_frames}")
     print(f"{dmd_name}: trial_num_cycles = {trial_num_cycles}")
+    raw_frame_line_idxs = frame_line_idxs.copy()
     frame_line_idxs, line_index_corrections = slap2_sync.normalize_continued_trial_line_indices(
         frame_line_idxs, trial_num_frames, plane_name=dmd_name
     )
@@ -807,6 +811,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
         )
         print(f"PRODUCED {len(timestamps)} SLAP2 TIMESTAMPS for {len(f0_data)} (DMD{dmd_num})")
         plane_qc = {
+            'raw_frame_line_idxs': raw_frame_line_idxs,
             'frame_line_idxs': frame_line_idxs,
             'trial_num_frames': trial_num_frames,
             'lines_per_cycle': lines_per_cycle,
@@ -824,6 +829,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
         )
         print(f"PRODUCED {len(timestamps)} SLAP2 TIMESTAMPS for {len(f0_data)} (DMD{dmd_num})")
         plane_qc = {
+            'raw_frame_line_idxs': raw_frame_line_idxs,
             'frame_line_idxs': frame_line_idxs,
             'trial_num_frames': trial_num_frames,
             'timestamps': timestamps,
@@ -844,6 +850,8 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
                 secondary_frame_line_idxs=frame_line_idxs,
                 secondary_trial_num_frames=trial_num_frames,
                 secondary_timestamps=timestamps,
+                primary_raw_frame_line_idxs=primary_qc['raw_frame_line_idxs'],
+                secondary_raw_frame_line_idxs=raw_frame_line_idxs,
                 qc_folder=qc_folder,
             )
         return fluorescence, timestamps, None, plane_qc

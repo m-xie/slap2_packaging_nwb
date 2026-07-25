@@ -2,16 +2,12 @@
 	"version": 1,
 	"attached_datasets": [
 		{
-			"id": "0e152e7b-4aac-433f-9f45-0c25b0d9cafe",
-			"mount": "nwb"
+			"id": "70adfd97-c670-4eef-ab29-67754f79c2c9",
+			"mount": "828409_2025-11-20_10-01-34"
 		},
 		{
-			"id": "165e4d5e-44d6-40d6-9c1a-a330e3a1077b",
-			"mount": "slap2_processed"
-		},
-		{
-			"id": "40a974e3-13a4-468c-a06e-7dda15af9c45",
-			"mount": "slap2_session"
+			"id": "b3c75188-2bda-41a1-b0da-5fd22b74e030",
+			"mount": "828409_2025-11-20_10-01-34_processed_2026-07-08_17-26-36"
 		}
 	]
 }

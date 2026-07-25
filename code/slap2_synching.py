@@ -641,18 +641,23 @@ def assign_samples_to_cycles(frame_line_idxs_chunk, lines_per_cycle):
 
 
 def normalize_continued_trial_line_indices(
-    frame_line_idxs, trial_num_frames, plane_name="SLAP2"
+    frame_line_idxs,
+    trial_num_frames,
+    plane_name="SLAP2",
+    continuation_gap_multiplier=1.5,
 ):
-    """Fix a scan-line counter that clearly failed to reset between trials.
+    """Fix scan-line counters that locally continue across trial boundaries.
 
     ``frame_line_idxs`` should normally restart at 1 for each trial. For
     example, three trials might look like this::
 
         expected:  [1, 30, 60, 100] [1, 30, 60, 100] [1, 30, 60, 100]
 
-    Occasionally the counter continues into the next trial instead::
+    Occasionally the counter continues into the next trial instead. The small
+    positive boundary gap is comparable to the ordinary spacing between samples::
 
         observed:  [1, 30, 60, 100] [101, 130, 160, 200] [1, 30, 60, 100]
+        boundary:                    100 -> 101 (gap 1)
 
     The samples still belong to the correct trials because ``trial_num_frames``
     defines the trial boundaries. Only the second trial's line coordinates are
@@ -664,11 +669,21 @@ def normalize_continued_trial_line_indices(
     assignment and the line-to-time map. A bad secondary-plane index can fall
     outside that map, causing many samples to receive the same clamped timestamp.
 
-    The function only corrects clear cases. It first estimates a normal trial's
-    maximum index from trials that start at 1. It then rebases a trial only when
-    its indices increase normally but its first index is already beyond that
-    maximum. A trial that starts above 1 but remains inside the normal range is
-    left alone because it may be a valid partial trial.
+    The function estimates ordinary sample spacing from all positive within-trial
+    line differences. A non-1 trial start is rebased only when it follows the
+    previous non-empty trial's raw endpoint by a positive gap no larger than
+    ``continuation_gap_multiplier`` times the 99th-percentile spacing. Raw
+    endpoints are used so consecutive failed resets can be corrected in order.
+
+    A large jump is left unchanged because it can represent a genuine partial
+    trial whose early samples were not recorded::
+
+        previous: [1, 30, 60, 100]
+        partial:  [5000, 5030, 5060]  # gap 4900, not local continuation
+
+    Empty trials are skipped when finding the previous observed endpoint. This
+    can still detect a counter that paused across one or more empty trial entries.
+    Ambiguous non-1 starts are preserved rather than modified.
 
     Parameters
     ----------
@@ -678,6 +693,9 @@ def normalize_continued_trial_line_indices(
         Number of samples in each trial.
     plane_name : str
         Plane label included in correction messages.
+    continuation_gap_multiplier : float
+        Multiplier applied to the 99th percentile of positive within-trial line
+        differences to define the largest plausible continuation gap.
 
     Returns
     -------
@@ -695,53 +713,74 @@ def normalize_continued_trial_line_indices(
             f"len(frame_line_idxs) = {len(frame_line_idxs)}."
         )
 
+    if continuation_gap_multiplier <= 0:
+        raise ValueError("continuation_gap_multiplier must be positive.")
+
     frame_boundaries = np.concatenate([[0], np.cumsum(trial_num_frames)])
-    reference_maxima = []
+    positive_within_trial_steps = []
     for i, n_frames in enumerate(trial_num_frames):
-        if n_frames == 0:
+        if n_frames < 2:
             continue
         trial_lines = frame_line_idxs[frame_boundaries[i]:frame_boundaries[i + 1]]
-        if trial_lines[0] == 1 and np.all(np.diff(trial_lines) >= 0):
-            reference_maxima.append(float(trial_lines[-1]))
+        trial_diffs = np.diff(trial_lines.astype(np.int64, copy=False))
+        positive_within_trial_steps.extend(trial_diffs[trial_diffs > 0])
 
-    if not reference_maxima:
+    if not positive_within_trial_steps:
         warnings.warn(
             f"{plane_name}: cannot detect continued trial line indices because "
-            f"no non-empty monotone trial starts at 1. No indices were changed."
+            f"no positive within-trial line differences are available. "
+            f"No indices were changed."
         )
         return frame_line_idxs.copy(), []
 
-    normal_trial_max = float(np.median(reference_maxima))
+    reference_step = float(np.percentile(positive_within_trial_steps, 99))
+    max_continuation_gap = continuation_gap_multiplier * reference_step
     normalized = frame_line_idxs.copy()
     corrections = []
+    previous_raw_last = None
     for i, n_frames in enumerate(trial_num_frames):
         if n_frames == 0:
             continue
         start = frame_boundaries[i]
         stop = frame_boundaries[i + 1]
-        trial_lines = normalized[start:stop]
-        if trial_lines[0] <= normal_trial_max or not np.all(np.diff(trial_lines) >= 0):
+        raw_trial_lines = frame_line_idxs[start:stop]
+        raw_trial_lines_int = raw_trial_lines.astype(np.int64, copy=False)
+        original_first = int(raw_trial_lines_int[0])
+        original_last = int(raw_trial_lines_int[-1])
+        boundary_gap = (
+            original_first - previous_raw_last
+            if previous_raw_last is not None
+            else None
+        )
+        previous_raw_last = original_last
+
+        if (
+            original_first == 1
+            or boundary_gap is None
+            or not 0 < boundary_gap <= max_continuation_gap
+            or not np.all(np.diff(raw_trial_lines_int) >= 0)
+        ):
             continue
 
-        original_first = int(trial_lines[0])
-        original_last = int(trial_lines[-1])
         offset = original_first - 1
-        normalized[start:stop] = trial_lines - offset
+        normalized[start:stop] = raw_trial_lines - offset
         corrected_last = int(normalized[stop - 1])
         correction = {
             'trial_number': i + 1,
             'offset': offset,
             'original_range': (original_first, original_last),
             'corrected_range': (1, corrected_last),
-            'normal_trial_max': normal_trial_max,
+            'boundary_gap': boundary_gap,
+            'max_continuation_gap': max_continuation_gap,
         }
         corrections.append(correction)
         print(
             f"{plane_name} TRIAL LINE-INDEX ISSUE: trial {i + 1} started at "
-            f"{original_first}, beyond the normal trial-local maximum "
-            f"{normal_trial_max:.0f}; the scan-line counter appears not to have "
-            f"reset. Subtracted offset {offset} from all {int(n_frames)} samples, "
-            f"changing range [{original_first}, {original_last}] to "
+            f"{original_first}, only {boundary_gap} lines after the previous "
+            f"observed endpoint (continuation threshold "
+            f"{max_continuation_gap:.1f}); the scan-line counter appears not to "
+            f"have reset. Subtracted offset {offset} from all {int(n_frames)} "
+            f"samples, changing range [{original_first}, {original_last}] to "
             f"[1, {corrected_last}]."
         )
 
@@ -1195,7 +1234,7 @@ def get_slap2_secondary_plane_timestamps(
     universal time coordinate across both planes. For each trial, the primary
     plane's (control_line_idxs, control_timestamps) control points define a
     piecewise-linear mapping from scan line to absolute time. Secondary plane
-    samples are aligned by interpolating their scan line indices onto this mapping
+    samples are aligned by interpolating their scan line indices onto this map
     using np.interp.
 
     Call ``normalize_continued_trial_line_indices`` on the secondary plane's
@@ -1309,12 +1348,15 @@ def plot_slap2_inputs_qc(
     primary_frame_line_idxs,
     primary_trial_num_frames,
     sync_qc_values,
+    secondary_frame_line_idxs=None,
     secondary_trial_num_frames=None,
+    primary_raw_frame_line_idxs=None,
+    secondary_raw_frame_line_idxs=None,
     clock_signal_window_s=0.5,
     qc_folder=None,
 ):
     """
-    Produce a 3×3 QC figure showing the raw inputs to the SLAP2 sync pipeline.
+    Produce a 4×3 QC figure showing inputs to the SLAP2 sync pipeline.
 
     Panels:
       Row 0 — Cycle clock:
@@ -1328,6 +1370,9 @@ def plot_slap2_inputs_qc(
       Row 2 — Per-trial frame counts:
         [2,0] Primary frames per trial (line plot)
         [2,1] Secondary frames per trial (line plot, orange; if provided)
+            Row 3 — Line-index normalization:
+                [3,0] DMD1 raw and normalized final scan-line index per trial
+                [3,1] DMD2 raw and normalized final scan-line index per trial
 
     Parameters
     ----------
@@ -1337,9 +1382,15 @@ def plot_slap2_inputs_qc(
     primary_trial_num_frames : np.ndarray
     sync_qc_values : dict
         Third return value of get_slap2_primary_plane_timestamps.
+    secondary_frame_line_idxs : np.ndarray, optional
+        Normalized secondary-plane scan-line indices.
     secondary_trial_num_frames : np.ndarray, optional
         Number of secondary plane fluorescence samples per trial.
         If provided, plotted in orange in [2,1].
+    primary_raw_frame_line_idxs : np.ndarray, optional
+        Primary scan-line indices before trial normalization.
+    secondary_raw_frame_line_idxs : np.ndarray, optional
+        Secondary scan-line indices before trial normalization.
     clock_signal_window_s : float
         Duration (seconds) of the clock signal window shown in [0,0]. Default 0.5.
     qc_folder : str or Path, optional
@@ -1371,7 +1422,7 @@ def plot_slap2_inputs_qc(
         (max(trial_max_vals),   f'max peak ({max(trial_max_vals)})',    'tab:red'),
     ]
 
-    fig, axes = plt.subplots(3, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(4, 3, figsize=(18, 16))
     fig.suptitle('SLAP2 Sync — Raw Inputs', fontsize=13, fontweight='bold')
 
     # ------------------------------------------------------------------
@@ -1507,12 +1558,117 @@ def plot_slap2_inputs_qc(
 
     axes[2, 2].axis('off')
 
+    # ------------------------------------------------------------------
+    # Row 3: Raw vs normalized per-trial scan-line ranges
+    # ------------------------------------------------------------------
+
+    has_line_normalization_inputs = (
+        primary_raw_frame_line_idxs is not None
+        and secondary_raw_frame_line_idxs is not None
+        and secondary_frame_line_idxs is not None
+        and secondary_trial_num_frames is not None
+    )
+    if has_line_normalization_inputs:
+        _plot_trial_line_normalization(
+            axes[3, 0],
+            primary_raw_frame_line_idxs,
+            primary_frame_line_idxs,
+            primary_trial_num_frames,
+            'DMD1',
+            'steelblue',
+        )
+        _plot_trial_line_normalization(
+            axes[3, 1],
+            secondary_raw_frame_line_idxs,
+            secondary_frame_line_idxs,
+            secondary_trial_num_frames,
+            'DMD2',
+            'tab:orange',
+        )
+    else:
+        axes[3, 0].axis('off')
+        axes[3, 1].axis('off')
+    axes[3, 2].axis('off')
+
     plt.tight_layout()
     if qc_folder is not None:
         fig.savefig(qc_folder / 'slap2_inputs_qc.png', dpi=150, bbox_inches='tight')
         plt.close(fig)
         return None
     return fig
+
+
+def _plot_trial_line_normalization(
+    ax,
+    raw_frame_line_idxs,
+    normalized_frame_line_idxs,
+    trial_num_frames,
+    plane_name,
+    color,
+):
+    """Compare raw and normalized final scan-line indices by trial."""
+    boundaries = np.concatenate([[0], np.cumsum(trial_num_frames)])
+    trial_numbers = []
+    raw_final_lines = []
+    normalized_final_lines = []
+    corrected_trials = []
+    for trial_idx in range(len(trial_num_frames)):
+        start = boundaries[trial_idx]
+        stop = boundaries[trial_idx + 1]
+        if start == stop:
+            continue
+        raw_trial_lines = raw_frame_line_idxs[start:stop]
+        normalized_trial_lines = normalized_frame_line_idxs[start:stop]
+        trial_number = trial_idx + 1
+        raw_final = float(raw_trial_lines[-1])
+        normalized_final = float(normalized_trial_lines[-1])
+
+        trial_numbers.append(trial_number)
+        raw_final_lines.append(raw_final)
+        normalized_final_lines.append(normalized_final)
+        if not np.array_equal(raw_trial_lines, normalized_trial_lines):
+            corrected_trials.append(trial_number)
+
+    ax.plot(
+        trial_numbers,
+        raw_final_lines,
+        color='0.2',
+        linestyle='-',
+        linewidth=0.6,
+        label='Raw final line',
+        zorder=2,
+    )
+    ax.plot(
+        trial_numbers,
+        normalized_final_lines,
+        color=color,
+        linestyle=(0, (1, 0.6)),
+        linewidth=0.8,
+        dash_capstyle='round',
+        label='Normalized final line',
+        zorder=3,
+    )
+    for trial_number in corrected_trials:
+        ax.annotate(
+            '',
+            xy=(trial_number, 0.91),
+            xytext=(trial_number, 0.99),
+            xycoords=ax.get_xaxis_transform(),
+            textcoords=ax.get_xaxis_transform(),
+            arrowprops={
+                'arrowstyle': '-|>',
+                'color': 'crimson',
+                'linewidth': 1.2,
+            },
+            zorder=4,
+        )
+
+    ax.set_yscale('log')
+    ax.set_xlabel('Trial number (1-based)')
+    ax.set_ylabel('Final scan-line index (log)')
+    ax.set_title(f'{plane_name} line-index normalization — '
+                 f'{len(corrected_trials)} corrected trial(s)')
+    ax.legend(fontsize=8)
 
 
 # ---------------------------------------------------------------------------
@@ -1680,7 +1836,12 @@ def _plot_sync_qc_timestamp_detail(axes_row, timestamps, color, label):
     ax.set_title(f'{label} sampling diffs distribution (log y)')
 
 
-def _plot_sync_qc_row3_control_points(axes_row, trial_line_time_maps, primary_timestamps, n_trials):
+def _plot_sync_qc_row3_control_points(
+    axes_row,
+    trial_line_time_maps,
+    primary_timestamps,
+    n_trials,
+):
     """Row 3: secondary plane interpolation control points."""
     # [0] Line→time control points (up to 10 trials, coloured by trial)
     ax = axes_row[0]
@@ -1735,6 +1896,8 @@ def plot_slap2_sync_qc(
     secondary_frame_line_idxs=None,
     secondary_trial_num_frames=None,
     secondary_timestamps=None,
+    primary_raw_frame_line_idxs=None,
+    secondary_raw_frame_line_idxs=None,
     clock_signal_window_s=0.5,
     qc_folder=None,
 ):
@@ -1763,7 +1926,7 @@ def plot_slap2_sync_qc(
       Row 3 (secondary only) — Interpolation control points:
         [3,0] Line→time control points for up to 10 trials (absolute, colored by trial)
         [3,1] Line→time control point shape — all trials normalized to [0,1]
-        [3,2] blank
+                [3,2] blank
 
       Row 4 (secondary only) — Secondary timestamp detail:
         [4,0] Secondary timestamps vs. sample index (monotonicity annotated)
@@ -1787,6 +1950,12 @@ def plot_slap2_sync_qc(
     secondary_timestamps : np.ndarray, optional
         If all three secondary arguments are provided, two additional rows are
         added for secondary alignment diagnostics.
+    primary_raw_frame_line_idxs : np.ndarray, optional
+        Primary scan-line indices before trial normalization, passed through to
+        the inputs QC figure.
+    secondary_raw_frame_line_idxs : np.ndarray, optional
+        Secondary scan-line indices before trial normalization, passed through
+        to the inputs QC figure.
     qc_folder : str or Path, optional
         If provided, the figure is saved as ``slap2_sync_qc.png`` inside this
         folder (dpi=150, tight layout) and closed before returning. The return
@@ -1803,7 +1972,10 @@ def plot_slap2_sync_qc(
         primary_frame_line_idxs,
         primary_trial_num_frames,
         sync_qc_values,
+        secondary_frame_line_idxs=secondary_frame_line_idxs,
         secondary_trial_num_frames=secondary_trial_num_frames,
+        primary_raw_frame_line_idxs=primary_raw_frame_line_idxs,
+        secondary_raw_frame_line_idxs=secondary_raw_frame_line_idxs,
         clock_signal_window_s=clock_signal_window_s,
         qc_folder=qc_folder,
     )
