@@ -21,10 +21,23 @@ import csv
 import warnings
 import matplotlib.pyplot as plt
 import os
+from importlib.metadata import version as package_version
 
 
 data_folder = Path("../data")
 results_folder = Path("../results")
+
+
+def ensure_was_generated_by(nwbfile):
+    """Populate empty NWB software provenance with the installed package version."""
+    was_generated_by = nwbfile.was_generated_by
+    if was_generated_by is not None and len(was_generated_by) > 0:
+        return
+
+    nwbfile.fields.pop("was_generated_by", None)
+    nwbfile.was_generated_by = [
+        ["aind-nwb-utils", package_version("aind-nwb-utils")]
+    ]
 
 
 def parse_bool(value):
@@ -180,6 +193,7 @@ def main():
     else:
         io_class = hdmf_zarr.NWBZarrIO
         nwb_file_obj = nwb_utils.create_base_nwb_file(session_path)
+        ensure_was_generated_by(nwb_file_obj)
         result_nwb_path = results_folder / f"{nwb_file_obj.session_id}.nwb"
         with io_class(str(result_nwb_path), "w") as nwb_io:
             nwb_io.write(nwb_file_obj)
@@ -212,6 +226,7 @@ def main():
             ophys_start_time = datetime.now().astimezone()
             add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_json, harp_data, session_path, qc_folder)
             ophys_end_time = datetime.now().astimezone()
+        ensure_was_generated_by(nwbfile)
         nwb_io.write(nwbfile)
     packaging_end_time = datetime.now().astimezone()
     slap2_rf_qc.compute_receptive_field_qc(qc_folder, result_nwb_path, onset_delay=rf_onset_delay)
