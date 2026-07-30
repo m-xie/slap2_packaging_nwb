@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from run_capsule import ensure_was_generated_by
+from run_capsule import ensure_was_generated_by, find_eye_tracking_paths
 
 
 class FakeNWBFile:
@@ -43,6 +43,42 @@ class EnsureWasGeneratedByTests(unittest.TestCase):
 
         self.assertIs(nwbfile.was_generated_by, provenance)
         package_version.assert_not_called()
+
+
+class FindEyeTrackingPathsTests(unittest.TestCase):
+    def test_prefers_dedicated_eye_tracking_asset(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            eye_path = root / "eye_tracking"
+            processed_path = root / "processed"
+            eye_path.mkdir()
+            processed_path.mkdir()
+            dedicated = eye_path / "ellipses_processed.h5"
+            fallback = processed_path / "ellipses_processed_old.h5"
+            dedicated.touch()
+            fallback.touch()
+
+            self.assertEqual(
+                find_eye_tracking_paths(eye_path, processed_path), [dedicated]
+            )
+
+    def test_falls_back_to_processed_asset(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            fallback = root / "processed" / "ellipses_processed.h5"
+            fallback.parent.mkdir()
+            fallback.touch()
+
+            self.assertEqual(
+                find_eye_tracking_paths(root / "missing", fallback.parent),
+                [fallback],
+            )
 
 
 if __name__ == "__main__":

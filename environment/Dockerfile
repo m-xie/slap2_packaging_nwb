@@ -16,6 +16,8 @@ RUN --mount=type=secret,id=git-access-token \
     harp-python==0.4.1 \
     hdmf-zarr==0.11.2 \
     matplotlib==3.9.4 \
+    pandas==2.2.3 \
     pynwb==3.1.1 \
     pyyaml==6.0.3 \
+    tables==3.10.1 \
     -e git+https://github.com/AllenInstitute/openscope_upload.git@d54ae99620cb81f92cffa75ecf2fe66e9ee2e3b2#egg=openscope-upload

@@ -2,6 +2,10 @@
 	"version": 1,
 	"attached_datasets": [
 		{
+			"id": "3c32be0c-dd6e-4a14-95e9-aa459c131a36",
+			"mount": "eye_tracking"
+		},
+		{
 			"id": "70adfd97-c670-4eef-ab29-67754f79c2c9",
 			"mount": "828409_2025-11-20_10-01-34"
 		},

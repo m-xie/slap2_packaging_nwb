@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 import harp_utils
 import slap2_synching as slap2_sync
+import slap2_running_packaging as running_packaging
+import slap2_eye_tracking_packaging as eye_tracking_packaging
 import slap2_receptive_fields_qc as slap2_rf_qc
 import stim_tuning_qc
 import json
@@ -40,14 +42,71 @@ def ensure_was_generated_by(nwbfile):
     ]
 
 
-def parse_bool(value):
-    if isinstance(value, bool):
-        return value
-    if value.lower() in ("true", "t"):
-        return True
-    if value.lower() in ("false", "f"):
-        return False
-    raise argparse.ArgumentTypeError("Expected true or false")
+def package_running_or_skip(
+    nwbfile, harp_data, qc_output_path, allow_skip_running=False
+):
+    """Package running data, optionally skipping when required HARP inputs are absent."""
+    missing_inputs = [
+        name for name in ("wheel", "analog_times") if name not in harp_data
+    ]
+    if missing_inputs:
+        message = f"Missing required running inputs: {', '.join(missing_inputs)}"
+        if allow_skip_running:
+            print(f"{message}; skipping running packaging.")
+            return None
+        raise KeyError(message)
+
+    return running_packaging.package_harp_running_data(
+        nwbfile,
+        harp_data,
+        qc_output_path=qc_output_path,
+    )
+
+
+def package_eye_or_skip(
+    nwbfile,
+    eye_tracking_paths,
+    eye_camera_metadata_path,
+    harp_data,
+    qc_output_path,
+    allow_skip_eye=False,
+):
+    """Package eye tracking, optionally skipping when required inputs are absent."""
+    problems = []
+    if not eye_tracking_paths:
+        problems.append("no ellipses_processed*.h5 file was found")
+    elif len(eye_tracking_paths) > 1:
+        problems.append(
+            f"expected one ellipses_processed*.h5 file, found {len(eye_tracking_paths)}"
+        )
+    if not eye_camera_metadata_path.is_file():
+        problems.append(f"EyeCamera metadata was not found at {eye_camera_metadata_path}")
+    if "time_reference" not in harp_data:
+        problems.append("HARP time_reference is missing")
+
+    if problems:
+        message = "Missing or ambiguous eye-tracking inputs: " + "; ".join(problems)
+        if allow_skip_eye:
+            print(f"{message}; skipping eye tracking packaging.")
+            return None
+        raise FileNotFoundError(message)
+
+    return eye_tracking_packaging.package_eye_tracking(
+        nwbfile,
+        eye_tracking_paths[0],
+        eye_camera_metadata_path,
+        harp_data["time_reference"],
+        qc_output_path=qc_output_path,
+    )
+
+
+def find_eye_tracking_paths(eye_tracking_path, processed_path):
+    """Find ellipse fits in the dedicated eye asset, then the processed asset."""
+    if eye_tracking_path.exists():
+        paths = list(eye_tracking_path.rglob("ellipses_processed*.h5"))
+        if paths:
+            return paths
+    return list(processed_path.rglob("ellipses_processed*.h5"))
 
 
 def write_data_process(
@@ -144,12 +203,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_session_dir", type=str, default="slap2_session")
     parser.add_argument("--input_processed_dir", type=str, default="slap2_processed")
+    parser.add_argument("--input_eye_tracking_dir", type=str, default="eye_tracking")
     parser.add_argument("--input_nwb_dir", type=str, default=f'nwb')
-    parser.add_argument("--use_input_nwb", type=parse_bool, default=False)
+    parser.add_argument("--use_input_nwb", type=str, default="false")
+    parser.add_argument("--allow_skip_running", type=str, default="false")
+    parser.add_argument("--allow_skip_eye", type=str, default="false")
     parser.add_argument("--expected_n_trials", type=int, default=None)
     parser.add_argument("--rf_onset_delay", type=float, default=0.2,
                         help="Onset delay in seconds for RF response windows (default: 0.2)")
     args = parser.parse_args()
+    use_input_nwb = args.use_input_nwb.lower() in ('t', 'true')
+    allow_skip_running = args.allow_skip_running.lower() in ('t', 'true')
+    allow_skip_eye = args.allow_skip_eye.lower() in ('t', 'true')
     expected_n_trials = args.expected_n_trials
     rf_onset_delay = args.rf_onset_delay
     input_nwb_dir = data_folder / Path(args.input_nwb_dir)
@@ -159,6 +224,9 @@ def main():
     processed_path = Path(args.input_processed_dir)
     if not processed_path.is_absolute():
         processed_path = data_folder / processed_path
+    eye_tracking_path = Path(args.input_eye_tracking_dir)
+    if not eye_tracking_path.is_absolute():
+        eye_tracking_path = data_folder / eye_tracking_path
     with open(session_path / "data_description.json", "r") as f:
         session_name = json.load(f)["name"]
     with open(processed_path / "data_description.json", "r") as f:
@@ -173,7 +241,7 @@ def main():
             entry.unlink()
     print(f'cleared results folder: {list(results_folder.iterdir())}')
 
-    if args.use_input_nwb:
+    if use_input_nwb:
         print('INPUT NWB DIR', input_nwb_dir)
         assert input_nwb_dir.exists(), "Input NWB dir does not exist"
         nwb_files = [p for p in input_nwb_dir.iterdir() if p.name.endswith(".nwb") or p.name.endswith(".nwb.zarr")]
@@ -205,6 +273,11 @@ def main():
     experiment_summary_path = next(processed_path.rglob('*experiment_summary.h5'))
     orientations_csv = next((session_path / 'behavior').rglob('orientations_orientations0.csv'))
     log_csv = next((session_path / 'behavior').rglob('orientations_logger.csv'))
+    eye_tracking_paths = find_eye_tracking_paths(eye_tracking_path, processed_path)
+    eye_camera_metadata_path = session_path / 'behavior-videos' / 'EyeCamera' / 'metadata.csv'
+
+    if eye_tracking_paths:
+        print('using eye tracking data:', eye_tracking_paths)
 
     print('using instrument json:', instrument_json_path)
     with open(instrument_json_path, "r") as f:
@@ -226,6 +299,22 @@ def main():
             ophys_start_time = datetime.now().astimezone()
             add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_json, harp_data, session_path, qc_folder)
             ophys_end_time = datetime.now().astimezone()
+            # Wheel counts already share the normalized HARP clock with SLAP2.
+            # Package them while this NWBFile is still open and writable.
+            package_running_or_skip(
+                nwbfile,
+                harp_data,
+                qc_output_path=qc_folder / "running_speed.png",
+                allow_skip_running=allow_skip_running,
+            )
+            package_eye_or_skip(
+                nwbfile,
+                eye_tracking_paths,
+                eye_camera_metadata_path,
+                harp_data,
+                qc_output_path=qc_folder / "eye_tracking.png",
+                allow_skip_eye=allow_skip_eye,
+            )
         ensure_was_generated_by(nwbfile)
         nwb_io.write(nwbfile)
     packaging_end_time = datetime.now().astimezone()
@@ -242,7 +331,10 @@ def main():
         ophys_end_time=ophys_end_time,
         packaging_end_time=packaging_end_time,
         parameters={
-            "use_input_nwb": args.use_input_nwb,
+            "use_input_nwb": use_input_nwb,
+            "input_eye_tracking_dir": str(eye_tracking_path),
+            "allow_skip_running": allow_skip_running,
+            "allow_skip_eye": allow_skip_eye,
             "expected_n_trials": expected_n_trials,
             "rf_onset_delay": rf_onset_delay,
         },

@@ -62,6 +62,8 @@ def extract_harp(harp_path, expected_n_trials=None):
     analog_data = reader.AnalogData.read()
     analog_times = analog_data.index.to_numpy()
     photodiode = analog_data["AnalogInput0"].to_numpy()
+    # Native signed int16 quadrature counts, paired one-to-one with analog_times.
+    # Conversion to angle and speed belongs in slap2_running_packaging.
     wheel = analog_data["Encoder"].to_numpy()
     slap2_cycle_clock_signal = reader.DigitalInputState.read()['DI3'].to_numpy()
     slap2_cycle_clock_times = reader.DigitalInputState.read()['DI3'].index.to_numpy()
