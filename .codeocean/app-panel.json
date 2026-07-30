@@ -38,6 +38,14 @@
 			"type": "text",
 			"value_type": "string",
 			"default_value": "slap2_processed"
+		},
+		{
+			"id": "odA1UqkM9gdwF8aW",
+			"name": "Allow Skipping Eye Packaging",
+			"param_name": "allow_skip_eye",
+			"type": "text",
+			"value_type": "string",
+			"default_value": "True"
 		}
 	]
 }

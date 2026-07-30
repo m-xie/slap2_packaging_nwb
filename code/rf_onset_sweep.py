@@ -37,6 +37,9 @@ def main():
             name = f'onset_{sign}{abs(d):.3f}'.replace('.', 'p')
             sub = qc_root / name
             rf_folder = sub / 'receptive_fields'
+            if len(list(rf_folder.glob('rf_mapping_*_rfs.png'))) == 4:
+                print(f'=== onset_delay={d:+.3f}s already complete; skipping ===', flush=True)
+                continue
             rf_folder.mkdir(parents=True, exist_ok=True)
             print(f'=== onset_delay={d:+.3f}s -> {sub} ===', flush=True)
             rf._compute_receptive_field_qc(rf_folder, nwbfile, float(d))
