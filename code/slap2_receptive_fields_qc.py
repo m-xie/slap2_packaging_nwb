@@ -40,6 +40,21 @@ def _sorted_unique_positions(stim_df, col):
     return sorted(set(float(v) for v in stim_df[col]))
 
 
+def _filter_assigned_trials(stim_df):
+    """Exclude stimuli outside retained SLAP2 imaging trials when available."""
+    if 'slap2_trial_idx' not in stim_df.columns:
+        return stim_df
+
+    assigned = stim_df['slap2_trial_idx'] >= 0
+    n_excluded = int((~assigned).sum())
+    if n_excluded:
+        print(
+            f"RF QC: excluding {n_excluded}/{len(stim_df)} stimuli not assigned "
+            "to a retained SLAP2 trial"
+        )
+    return stim_df.loc[assigned].reset_index(drop=True)
+
+
 def _calculate_receptive_fields(stim_df, dff, timestamps, onset_delay, xcol, ycol):
     """
     Compute per-ROI receptive fields.
@@ -183,6 +198,10 @@ def _compute_receptive_field_qc(rf_folder, nwbfile, onset_delay):
     for table_name in rf_table_names:
         stim_df = nwbfile.intervals[table_name].to_dataframe()
         print(f"RF QC: processing table '{table_name}' ({len(stim_df)} rows)")
+        stim_df = _filter_assigned_trials(stim_df)
+        if stim_df.empty:
+            print(f"RF QC: table '{table_name}' has no stimuli in retained SLAP2 trials; skipping.")
+            continue
 
         xcol, ycol = _find_xy_cols(stim_df)
         n_x = len(_sorted_unique_positions(stim_df, xcol))

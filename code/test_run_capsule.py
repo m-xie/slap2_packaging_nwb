@@ -1,7 +1,17 @@
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
-from run_capsule import ensure_was_generated_by, find_eye_tracking_paths
+import numpy as np
+
+from run_capsule import (
+    ensure_was_generated_by,
+    filter_slap2_acquisition,
+    filter_planes_with_sources,
+    find_eye_tracking_paths,
+    resolve_slap2_acquisition,
+    trim_unterminated_harp_trial,
+)
 
 
 class FakeNWBFile:
@@ -79,6 +89,136 @@ class FindEyeTrackingPathsTests(unittest.TestCase):
                 find_eye_tracking_paths(root / "missing", fallback.parent),
                 [fallback],
             )
+
+
+class FilterPlanesWithSourcesTests(unittest.TestCase):
+    def setUp(self):
+        self.plane_inputs = [
+            ("DMD1", "DMD1", "1"),
+            ("DMD2", "DMD2", "2"),
+        ]
+
+    def test_warns_and_skips_dmd_with_missing_sources(self):
+        experiment_summary = {
+            "DMD1": {"sources": {"spatial": object()}},
+            "DMD2": {},
+        }
+
+        with self.assertWarnsRegex(UserWarning, "DMD2 is missing sources"):
+            result = filter_planes_with_sources(
+                self.plane_inputs, experiment_summary
+            )
+
+        self.assertEqual(result, [self.plane_inputs[0]])
+
+    def test_warns_and_skips_dmd_with_empty_sources(self):
+        experiment_summary = {
+            "DMD1": {"sources": {}},
+            "DMD2": {"sources": {"temporal": object()}},
+        }
+
+        with self.assertWarnsRegex(UserWarning, "DMD1 is missing sources"):
+            result = filter_planes_with_sources(
+                self.plane_inputs, experiment_summary
+            )
+
+        self.assertEqual(result, [self.plane_inputs[1]])
+
+    def test_raises_when_all_dmds_lack_sources(self):
+        experiment_summary = {
+            "DMD1": {},
+            "DMD2": {"sources": {}},
+        }
+
+        with self.assertRaisesRegex(ValueError, "all DMDs"):
+            filter_planes_with_sources(self.plane_inputs, experiment_summary)
+
+
+class TrimUnterminatedHarpTrialTests(unittest.TestCase):
+    @staticmethod
+    def harp_data(starts, ends):
+        clock_times = np.arange(0.0, 90.0)
+        return {
+            "slap2_start_signal": np.ones(len(starts)),
+            "slap2_start_times": np.asarray(starts),
+            "normalized_slap2_start": np.asarray(starts),
+            "slap2_end_times": np.asarray(ends),
+            "normalized_slap2_end": np.asarray(ends),
+            "slap2_cycle_clock_signal": np.ones(len(clock_times)),
+            "slap2_cycle_clock_times": clock_times,
+            "normalized_slap2_cycle_clock_times": clock_times,
+        }
+
+    def test_balanced_trials_are_unchanged(self):
+        harp_data = self.harp_data([0.0, 30.0], [29.0, 59.0])
+
+        result, excluded = trim_unterminated_harp_trial(harp_data)
+
+        np.testing.assert_array_equal(result["normalized_slap2_start"], [0.0, 30.0])
+        np.testing.assert_array_equal(result["normalized_slap2_end"], [29.0, 59.0])
+        self.assertFalse(excluded)
+
+    def test_excludes_final_start_and_cycle_clock_without_end(self):
+        harp_data = self.harp_data([0.0, 30.0, 60.0], [29.0, 59.0])
+
+        with self.assertWarnsRegex(RuntimeWarning, "final SLAP2 trial"):
+            result, excluded = trim_unterminated_harp_trial(harp_data)
+
+        np.testing.assert_array_equal(result["normalized_slap2_start"], [0.0, 30.0])
+        np.testing.assert_array_equal(result["normalized_slap2_end"], [29.0, 59.0])
+        self.assertEqual(result["slap2_cycle_clock_times"][-1], 59.0)
+        self.assertTrue(excluded)
+
+    def test_rejects_other_pulse_count_mismatches(self):
+        harp_data = self.harp_data([0.0, 30.0, 60.0], [29.0])
+
+        with self.assertRaisesRegex(ValueError, "Unsupported SLAP2 trial pulse mismatch"):
+            trim_unterminated_harp_trial(harp_data)
+
+
+class TrimUnterminatedProcessedTrialTests(unittest.TestCase):
+    def test_resolution_excludes_final_dat_evidence(self):
+        dat_paths = [
+            Path("acquisition_20251111_144104_DMD1-TRIAL000001.dat"),
+            Path("acquisition_20251111_144104_DMD1-TRIAL000002.dat"),
+        ]
+
+        result = resolve_slap2_acquisition(
+            dat_paths, n_summary_trials=2, excluded_trailing_trials=1
+        )
+
+        self.assertEqual(result["retained_trial_count"], 1)
+        self.assertEqual(result["highest_dat_trial"], 1)
+
+    def test_filters_final_trial_from_all_processed_arrays(self):
+        dat_paths = [
+            Path("acquisition_20251111_144104_DMD1-TRIAL000001.dat"),
+            Path("acquisition_20251111_144104_DMD1-TRIAL000002.dat"),
+        ]
+        values = np.arange(5)
+        acquisition_resolution = {
+            "acquisition_prefix": "acquisition_20251111_144104",
+            "excluded_trial_count": 0,
+            "excluded_trailing_trials": 1,
+            "retained_trial_count": 1,
+        }
+
+        result = filter_slap2_acquisition(
+            1,
+            dat_paths,
+            [Path("acquisition_20251111_144104_DMD1.meta")],
+            np.asarray([2, 3]),
+            values,
+            values,
+            values,
+            values,
+            acquisition_resolution,
+        )
+
+        np.testing.assert_array_equal(result["trial_num_frames"], [2])
+        for key in ("frame_line_idxs", "F0", "dF_denoised", "events"):
+            np.testing.assert_array_equal(result[key], [0, 1])
+        self.assertEqual(result["dat_paths"], dat_paths[:1])
 
 
 if __name__ == "__main__":

@@ -290,6 +290,8 @@ def main():
         nwbfile = nwb_io.read()
         with h5py.File(experiment_summary_path, "r") as experiment_summary:
             harp_data = harp_utils.extract_harp(harp_path)
+            harp_data = harp_utils.trim_leading_trial_pulse_artifact(harp_data)
+            harp_data, exclude_final_trial = trim_unterminated_harp_trial(harp_data)
             qc_folder = results_folder / 'qc'
             qc_folder.mkdir(exist_ok=True)
             (qc_folder / 'syncing').mkdir(exist_ok=True)
@@ -297,7 +299,16 @@ def main():
             add_stim_table(nwbfile, orientations_csv, log_csv, harp_data)
             stimulus_end_time = datetime.now().astimezone()
             ophys_start_time = datetime.now().astimezone()
-            add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_json, harp_data, session_path, qc_folder)
+            add_ophys_to_nwb(
+                experiment_summary,
+                nwbfile,
+                instrument_json,
+                acquisition_json,
+                harp_data,
+                session_path,
+                qc_folder,
+                exclude_final_trial=exclude_final_trial,
+            )
             ophys_end_time = datetime.now().astimezone()
             # Wheel counts already share the normalized HARP clock with SLAP2.
             # Package them while this NWBFile is still open and writable.
@@ -355,6 +366,40 @@ def get_expected_n_frames(experiment_summary):
     trial_num_frames = experiment_summary['DMD1']['frame_info']['trial_num_frames']
     assert len(trial_num_frames) == len(experiment_summary['DMD2']['frame_info']['trial_num_frames']), 'DMDs have different numbers of trials'
     return len(trial_num_frames)
+
+
+def trim_unterminated_harp_trial(harp_data):
+    """Exclude one trailing SLAP2 trial that has a start pulse but no end pulse."""
+    starts = harp_data['normalized_slap2_start']
+    ends = harp_data['normalized_slap2_end']
+    excluded_trailing_trials = 0
+
+    if len(starts) == len(ends) + 1 and starts[-1] > ends[-1]:
+        excluded_trailing_trials = 1
+    elif len(starts) != len(ends):
+        raise ValueError(
+            f"Unsupported SLAP2 trial pulse mismatch: {len(starts)} starts and "
+            f"{len(ends)} ends."
+        )
+
+    trimmed = dict(harp_data)
+    if not excluded_trailing_trials:
+        return trimmed, False
+
+    for key in ('slap2_start_signal', 'slap2_start_times', 'normalized_slap2_start'):
+        trimmed[key] = harp_data[key][:-1]
+    last_complete_end = ends[-1]
+    keep_clock = harp_data['slap2_cycle_clock_times'] <= last_complete_end
+    trimmed['slap2_cycle_clock_signal'] = harp_data['slap2_cycle_clock_signal'][keep_clock]
+    trimmed['slap2_cycle_clock_times'] = harp_data['slap2_cycle_clock_times'][keep_clock]
+    trimmed['normalized_slap2_cycle_clock_times'] = trimmed['slap2_cycle_clock_times']
+    warnings.warn(
+        "The final SLAP2 trial has a start pulse but no end pulse; excluding the "
+        "final trial from fluorescence packaging.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return trimmed, True
 
 
 def find_slap2_trial_index(time, start_trials, end_trials):
@@ -619,8 +664,21 @@ def add_image_segmentation(experiment_summary, imaging_plane, dmd_name, image_se
     return roi_table_region
 
 
-def resolve_slap2_acquisition(dat_paths, n_summary_trials):
-    """Resolve the retained acquisition and leading summary trials across all DMDs."""
+def resolve_slap2_acquisition(
+    dat_paths, n_summary_trials, excluded_trailing_trials=0
+):
+    """Resolve which SLAP2 acquisition and processed trial range to package.
+
+    Some summaries contain an aborted acquisition followed by the intended one,
+    with trial numbering restarted in each acquisition. This function selects the
+    later acquisition and excludes summary trials belonging to the earlier run.
+
+    Interrupted sessions can also leave HARP with an unmatched final trial-start
+    pulse and SLAP2 with an incomplete or malformed final trial. This function
+    applies the resulting trailing-trial exclusion, keeping the processed trial
+    count and .dat evidence consistent for downstream synchronization across all
+    DMDs.
+    """
     dat_pattern = re.compile(
         r'^(?P<prefix>.+_(?P<timestamp>\d{8}_\d{6}))_DMD'
         r'(?P<dmd>\d+)-TRIAL(?P<trial>\d+)\.dat$',
@@ -667,7 +725,9 @@ def resolve_slap2_acquisition(dat_paths, n_summary_trials):
     else:
         excluded_prefix, excluded_entries = ordered_groups[0]
         excluded_trial_count = max(trial_num for _, trial_num, _ in excluded_entries)
-        retained_trial_count = n_summary_trials - excluded_trial_count
+        retained_trial_count = (
+            n_summary_trials - excluded_trial_count - excluded_trailing_trials
+        )
         if retained_trial_count <= 0:
             raise ValueError(
                 f"Earlier acquisition {excluded_prefix} reaches trial "
@@ -688,11 +748,14 @@ def resolve_slap2_acquisition(dat_paths, n_summary_trials):
             stacklevel=2,
         )
 
-    retained_trial_count = n_summary_trials - excluded_trial_count
+    retained_trial_count = (
+        n_summary_trials - excluded_trial_count - excluded_trailing_trials
+    )
     selected_trial_numbers = [trial_num for _, trial_num, _ in selected_entries]
     invalid_trial_numbers = [
         trial_num for trial_num in selected_trial_numbers
-        if trial_num < 1 or trial_num > retained_trial_count
+        if trial_num < 1
+        or trial_num > retained_trial_count + excluded_trailing_trials
     ]
     if invalid_trial_numbers:
         raise ValueError(
@@ -701,7 +764,14 @@ def resolve_slap2_acquisition(dat_paths, n_summary_trials):
             f"{sorted(set(invalid_trial_numbers))}."
         )
 
-    observed_retained_span = max(selected_trial_numbers)
+    retained_trial_numbers = [
+        trial_num
+        for trial_num in selected_trial_numbers
+        if trial_num <= retained_trial_count
+    ]
+    if not retained_trial_numbers:
+        raise ValueError(f"No retained .dat trials remain in {selected_prefix}.")
+    observed_retained_span = max(retained_trial_numbers)
     if observed_retained_span < retained_trial_count:
         warnings.warn(
             f"Retained acquisition {selected_prefix} has {retained_trial_count} "
@@ -715,12 +785,13 @@ def resolve_slap2_acquisition(dat_paths, n_summary_trials):
     return {
         'acquisition_prefix': selected_prefix,
         'excluded_trial_count': excluded_trial_count,
+        'excluded_trailing_trials': excluded_trailing_trials,
         'retained_trial_count': retained_trial_count,
         'highest_dat_trial': observed_retained_span,
     }
 
 
-def filter_early_short_slap2_acquisition(
+def filter_slap2_acquisition(
     dmd_num,
     dat_paths,
     meta_paths,
@@ -731,7 +802,7 @@ def filter_early_short_slap2_acquisition(
     events_data,
     acquisition_resolution,
 ):
-    """Apply a shared acquisition decision to one DMD's processed arrays and files."""
+    """Apply shared leading and trailing trial exclusions to one DMD."""
     dat_pattern = re.compile(
         r'^(?P<prefix>.+_(?P<timestamp>\d{8}_\d{6}))_DMD'
         rf'{int(dmd_num)}-TRIAL(?P<trial>\d+)\.dat$',
@@ -739,6 +810,7 @@ def filter_early_short_slap2_acquisition(
     )
     selected_prefix = acquisition_resolution['acquisition_prefix']
     n_excluded_trials = acquisition_resolution['excluded_trial_count']
+    n_excluded_trailing_trials = acquisition_resolution['excluded_trailing_trials']
     retained_trial_count = acquisition_resolution['retained_trial_count']
     selected_entries = []
     for dat_path in dat_paths:
@@ -755,14 +827,15 @@ def filter_early_short_slap2_acquisition(
     selected_trial_numbers = [trial for trial, _ in selected_entries]
     if len(set(selected_trial_numbers)) != len(selected_trial_numbers):
         raise ValueError(f"Duplicate trial numbers found within {selected_prefix} for DMD{dmd_num}.")
+    available_trial_count = retained_trial_count + n_excluded_trailing_trials
     invalid_trial_numbers = [
         trial for trial in selected_trial_numbers
-        if trial < 1 or trial > retained_trial_count
+        if trial < 1 or trial > available_trial_count
     ]
     if invalid_trial_numbers:
         raise ValueError(
             f"Acquisition {selected_prefix} has DMD{dmd_num} trial numbers outside "
-            f"the retained summary's 1..{retained_trial_count} range: "
+            f"the available summary's 1..{available_trial_count} range: "
             f"{invalid_trial_numbers}."
         )
 
@@ -781,6 +854,14 @@ def filter_early_short_slap2_acquisition(
             )
 
     sample_start = int(np.sum(trial_num_frames[:n_excluded_trials]))
+    if n_excluded_trailing_trials:
+        sample_end = len(frame_line_idxs) - int(
+            np.sum(trial_num_frames[-n_excluded_trailing_trials:])
+        )
+        trial_end = -n_excluded_trailing_trials
+    else:
+        sample_end = len(frame_line_idxs)
+        trial_end = None
     selected_meta_paths = [
         path for path in meta_paths
         if path.name.lower() == f'{selected_prefix}_DMD{int(dmd_num)}.meta'.lower()
@@ -794,13 +875,17 @@ def filter_early_short_slap2_acquisition(
     return {
         'acquisition_prefix': selected_prefix,
         'excluded_trial_count': n_excluded_trials,
-        'dat_paths': [path for _, path in sorted(selected_entries)],
+        'dat_paths': [
+            path
+            for trial, path in sorted(selected_entries)
+            if trial <= retained_trial_count
+        ],
         'meta_path': selected_meta_paths[0],
-        'trial_num_frames': trial_num_frames[n_excluded_trials:],
-        'frame_line_idxs': frame_line_idxs[sample_start:],
-        'F0': f0_data[sample_start:],
-        'dF_denoised': df_denoised_data[sample_start:],
-        'events': events_data[sample_start:],
+        'trial_num_frames': trial_num_frames[n_excluded_trials:trial_end],
+        'frame_line_idxs': frame_line_idxs[sample_start:sample_end],
+        'F0': f0_data[sample_start:sample_end],
+        'dF_denoised': df_denoised_data[sample_start:sample_end],
+        'events': events_data[sample_start:sample_end],
     }
 
 
@@ -823,7 +908,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
     harp_data : dict
         Dict from harp_utils.extract_harp containing clock signal arrays.
     trial_line_time_maps : list or None
-        None for the primary plane (DMD1); for secondary planes, pass the
+        None for the first source-bearing plane; for secondary planes, pass the
         trial_line_time_maps returned from the primary plane call.
     primary_qc : dict or None
         plane_qc dict returned from the primary DMD call. Required for QC
@@ -859,7 +944,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
     trial_num_frames = dmd_group['frame_info']['trial_num_frames'][()][0]
     if acquisition_resolution is None:
         acquisition_resolution = resolve_slap2_acquisition(dat_paths, len(trial_num_frames))
-    filtered = filter_early_short_slap2_acquisition(
+    filtered = filter_slap2_acquisition(
         dmd_num,
         dat_paths,
         meta_paths,
@@ -908,7 +993,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
         frame_line_idxs, trial_num_frames, plane_name=dmd_name
     )
 
-    if int(dmd_num) == 1:
+    if trial_line_time_maps is None:
         timestamps, out_maps, sync_qc_values = slap2_sync.get_slap2_primary_plane_timestamps(
             frame_line_idxs, trial_num_frames, lines_per_cycle,
             harp_data['slap2_cycle_clock_signal'],
@@ -1091,7 +1176,43 @@ def create_device(nwbfile, instrument_json):
     return device
 
 
-def add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_json, harp_data, session_path, qc_folder=None):
+def filter_planes_with_sources(plane_inputs, experiment_summary):
+    """Skip DMDs without source data, unless no DMD has sources."""
+    planes_with_sources = []
+    skipped_dmds = []
+    for plane_input in plane_inputs:
+        plane, dmd_name = plane_input[:2]
+        plane_group = experiment_summary[plane]
+        if 'sources' in plane_group and len(plane_group['sources']) > 0:
+            planes_with_sources.append(plane_input)
+        else:
+            skipped_dmds.append(dmd_name)
+
+    if not planes_with_sources:
+        raise ValueError(
+            "Cannot package ophys data because all DMDs are missing sources or "
+            "have empty sources."
+        )
+
+    for dmd_name in skipped_dmds:
+        warnings.warn(
+            f"{dmd_name} is missing sources or has empty sources; skipping "
+            "source-dependent packaging for this DMD.",
+            UserWarning,
+        )
+    return planes_with_sources
+
+
+def add_ophys_to_nwb(
+    experiment_summary,
+    nwbfile,
+    instrument_json,
+    acquisition_json,
+    harp_data,
+    session_path,
+    qc_folder=None,
+    exclude_final_trial=False,
+):
     """
     Build the full ophys structure in the NWB file, iterating over DMDs (planes).
     For each DMD, create imaging plane, ROI table, add fluorescence, and add mean images.
@@ -1119,7 +1240,9 @@ def add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_j
         n_summary_trials = len(experiment_summary[plane]['frame_info']['trial_num_frames'][()][0])
         plane_inputs.append((plane, dmd_name, dmd_num, meta_paths, dat_paths, n_summary_trials))
 
-    summary_trial_counts = {plane_input[-1] for plane_input in plane_inputs}
+    source_plane_inputs = filter_planes_with_sources(plane_inputs, experiment_summary)
+    source_planes = {plane_input[0] for plane_input in source_plane_inputs}
+    summary_trial_counts = {plane_input[-1] for plane_input in source_plane_inputs}
     if len(summary_trial_counts) != 1:
         raise ValueError(
             f"DMD experiment summaries have different trial counts: "
@@ -1127,15 +1250,21 @@ def add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_j
         )
     all_dat_paths = [
         dat_path
-        for _, _, _, _, dat_paths, _ in plane_inputs
+        for _, _, _, _, dat_paths, _ in source_plane_inputs
         for dat_path in dat_paths
     ]
     acquisition_resolution = resolve_slap2_acquisition(
         all_dat_paths,
         summary_trial_counts.pop(),
+        excluded_trailing_trials=int(exclude_final_trial),
     )
 
     for plane, dmd_name, dmd_num, meta_paths, dat_paths, _ in plane_inputs:
+        imaging_plane = create_imaging_plane(nwbfile, dmd_name, device, acquisition_json, plane_key=plane)
+        add_mean_images(experiment_summary, dmd_name, ophys_mod, plane_key=plane)
+        if plane not in source_planes:
+            continue
+
         print(f'found {len(dat_paths)} .dat files for DMD{dmd_num}')
         sync_qc_folder = (qc_folder / 'syncing') if qc_folder is not None else None
         fluorescence, timestamps, out_maps, plane_qc = sync_slap2_fluorescence(
@@ -1160,7 +1289,7 @@ def add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_j
                 f"trials, but DMD{dmd_num} selected {plane_qc['acquisition_prefix']} "
                 f"with {plane_qc['excluded_trial_count']} excluded trials."
             )
-        if int(dmd_num) == 1:
+        if out_maps is not None:
             trial_line_time_maps = out_maps
             primary_qc = plane_qc
         else:
@@ -1170,9 +1299,7 @@ def add_ophys_to_nwb(experiment_summary, nwbfile, instrument_json, acquisition_j
                 'secondary_timestamps': plane_qc['timestamps'],
             }
 
-        imaging_plane = create_imaging_plane(nwbfile, dmd_name, device, acquisition_json, plane_key=plane)
         roi_table = add_image_segmentation(experiment_summary, imaging_plane, dmd_name, image_segmentation, plane_key=plane)
-        add_mean_images(experiment_summary, dmd_name, ophys_mod, plane_key=plane)
         add_fluorescence(fluorescence, timestamps, dmd_name, roi_table, ophys_mod)
 
 

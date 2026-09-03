@@ -4,6 +4,7 @@ import requests
 import yaml
 import pathlib as pl
 import io
+import warnings
 
 
 def _get_yml_from_who_am_i(who_am_i: int, release: str = "main") -> io.BytesIO:
@@ -113,6 +114,45 @@ def extract_harp(harp_path, expected_n_trials=None):
             print(f"slicing {trials_to_slice} from {key}:{len(time_arr)} to get {expected_n_trials}")
             time_dict[key] = time_dict[key][trials_to_slice:]
     return time_dict
+
+
+def trim_leading_trial_pulse_artifact(harp_data):
+    """Remove a very short leading SLAP2 start/end pulse pair."""
+    starts = harp_data["normalized_slap2_start"]
+    ends = harp_data["normalized_slap2_end"]
+    n_complete_trials = min(len(starts), len(ends))
+    if n_complete_trials < 2:
+        return dict(harp_data)
+
+    durations = ends[:n_complete_trials] - starts[:n_complete_trials]
+    first_duration = float(durations[0])
+    typical_duration = float(np.median(durations[1:]))
+    is_artifact = (
+        0 < first_duration < 0.1
+        and first_duration < 0.1 * typical_duration
+    )
+    if not is_artifact:
+        return dict(harp_data)
+
+    trimmed = dict(harp_data)
+    for key in (
+        "slap2_start_signal",
+        "slap2_start_times",
+        "normalized_slap2_start",
+        "slap2_end_signal",
+        "slap2_end_times",
+        "normalized_slap2_end",
+    ):
+        trimmed[key] = harp_data[key][1:]
+
+    warnings.warn(
+        "Removed erroneous leading SLAP2 pulse pair: "
+        f"duration was {first_duration:.6f} seconds versus a typical later "
+        f"trial duration of {typical_duration:.6f} seconds.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return trimmed
 
 
 def get_concatenated_timestamps(trace, trial_start_idxs, harp_data):
