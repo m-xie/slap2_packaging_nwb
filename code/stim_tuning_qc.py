@@ -10,6 +10,7 @@ import pynwb
 
 
 _DFF_TAGS = ('dff', 'dfoverf', 'df_over_f', 'delta_f_over_f')
+_ORIENTATION_TABLE = 'standard_control'
 
 
 def _is_dff_series(name):
@@ -162,6 +163,240 @@ def _calculate_stim_tuning(
         'peri_bin_size': peri_bin_size,
         'peri_zscore': peri_zscore,
     }
+
+
+def _calculate_orientation_tuning(
+    stim_df,
+    dff,
+    timestamps,
+    baseline_window=(-0.3, 0.0),
+    response_window=(0.1, 0.6),
+    peri_window=(-0.5, 1.5),
+    peri_bin_size=0.05,
+):
+    """Calculate baseline-subtracted direction responses for two stimulus blocks."""
+    presentations = stim_df.loc[stim_df['TrialType'] == 'single'].copy()
+    if 'slap2_trial_idx' in presentations:
+        presentations = presentations.loc[presentations['slap2_trial_idx'] >= 0]
+    presentations = presentations.loc[np.isfinite(presentations['Orientation'])]
+    presentations['orientation_degrees'] = np.mod(
+        np.degrees(presentations['Orientation'].astype(float)), 360.0
+    )
+
+    block_values = np.sort(presentations['BlockNumber'].unique())
+    orientations = np.sort(presentations['orientation_degrees'].unique())
+    peri_times = np.arange(peri_window[0], peri_window[1], peri_bin_size)
+    responses = np.full((len(presentations), dff.shape[1]), np.nan)
+    peri_responses = np.full(
+        (len(presentations), len(peri_times), dff.shape[1]), np.nan
+    )
+
+    for presentation_index, (_, presentation) in enumerate(presentations.iterrows()):
+        onset = float(presentation['start_time'])
+        baseline = _window_median(
+            dff,
+            timestamps,
+            onset + baseline_window[0],
+            onset + baseline_window[1],
+        )
+        responses[presentation_index] = (
+            _window_median(
+                dff,
+                timestamps,
+                onset + response_window[0],
+                onset + response_window[1],
+            )
+            - baseline
+        )
+        for time_index, relative_time in enumerate(peri_times):
+            peri_responses[presentation_index, time_index] = (
+                _window_median(
+                    dff,
+                    timestamps,
+                    onset + relative_time,
+                    onset + relative_time + peri_bin_size,
+                )
+                - baseline
+            )
+
+    tuning_mean = np.full(
+        (len(block_values), len(orientations), dff.shape[1]), np.nan
+    )
+    tuning_sem = np.full_like(tuning_mean, np.nan)
+    presentation_counts = np.zeros((len(block_values), len(orientations)), dtype=int)
+    peri_mean = np.full(
+        (len(block_values), len(peri_times), dff.shape[1]), np.nan
+    )
+
+    for block_index, block_value in enumerate(block_values):
+        block_mask = presentations['BlockNumber'].to_numpy() == block_value
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            peri_mean[block_index] = np.nanmean(peri_responses[block_mask], axis=0)
+        for orientation_index, orientation in enumerate(orientations):
+            mask = block_mask & np.isclose(
+                presentations['orientation_degrees'].to_numpy(), orientation
+            )
+            presentation_counts[block_index, orientation_index] = int(mask.sum())
+            if not np.any(mask):
+                continue
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                tuning_mean[block_index, orientation_index] = np.nanmean(
+                    responses[mask], axis=0
+                )
+                tuning_sem[block_index, orientation_index] = np.nanstd(
+                    responses[mask], axis=0, ddof=1
+                ) / np.sqrt(mask.sum())
+
+    return {
+        'block_values': block_values,
+        'orientations': orientations,
+        'presentation_counts': presentation_counts,
+        'tuning_mean': tuning_mean,
+        'tuning_sem': tuning_sem,
+        'peri_times': peri_times,
+        'peri_mean': peri_mean,
+        'n_presentations': len(presentations),
+        'baseline_window': baseline_window,
+        'response_window': response_window,
+    }
+
+
+def _orientation_labels(orientations):
+    return [f'{value:g}°' for value in orientations]
+
+
+def _normalize_orientation_tuning(tuning_mean):
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        center = np.nanmean(tuning_mean, axis=1, keepdims=True)
+        scale = np.nanstd(tuning_mean, axis=1, keepdims=True)
+    scale[scale == 0] = np.nan
+    return (tuning_mean - center) / scale
+
+
+def _orientation_heatmap(normalized_tuning, block_index, roi_order):
+    """Return an ROI-by-direction matrix without advanced-index axis reordering."""
+    return normalized_tuning[block_index][:, roi_order].T
+
+
+def _save_orientation_summary(series_name, metrics, output_path):
+    tuning_mean = metrics['tuning_mean']
+    normalized = _normalize_orientation_tuning(tuning_mean)
+    orientations = metrics['orientations']
+    block_values = metrics['block_values']
+    preferred = np.nanargmax(np.nan_to_num(normalized[0], nan=-np.inf), axis=0)
+    roi_order = np.argsort(preferred, kind='stable')
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11), constrained_layout=True)
+    image = None
+    for block_index, axis in enumerate(axes[0]):
+        image = axis.imshow(
+            _orientation_heatmap(normalized, block_index, roi_order),
+            aspect='auto',
+            interpolation='nearest',
+            cmap='coolwarm',
+            vmin=-2.5,
+            vmax=2.5,
+        )
+        axis.set_title(f'Block {block_values[block_index]} tuning, sorted by block 1')
+        axis.set_xlabel('Direction')
+        axis.set_ylabel('ROI (sorted)')
+        axis.set_xticks(np.arange(len(orientations)))
+        axis.set_xticklabels(_orientation_labels(orientations), rotation=45, ha='right')
+    fig.colorbar(image, ax=axes[0], label='Within-ROI response z-score', shrink=0.8)
+
+    colors = ('tab:blue', 'tab:orange')
+    for block_index, block_value in enumerate(block_values):
+        population_trace = np.nanmean(metrics['peri_mean'][block_index], axis=1)
+        population_sem = np.nanstd(metrics['peri_mean'][block_index], axis=1) / np.sqrt(
+            metrics['peri_mean'].shape[2]
+        )
+        axes[1, 0].plot(
+            metrics['peri_times'], population_trace,
+            color=colors[block_index], label=f'Block {block_value}',
+        )
+        axes[1, 0].fill_between(
+            metrics['peri_times'],
+            population_trace - population_sem,
+            population_trace + population_sem,
+            color=colors[block_index], alpha=0.2,
+        )
+    axes[1, 0].axvline(0, color='black', linestyle='--', linewidth=1)
+    axes[1, 0].axvspan(0, 0.343, color='0.8', alpha=0.4, label='Stimulus')
+    axes[1, 0].set(
+        title='Population response to grating onset',
+        xlabel='Time from onset (s)',
+        ylabel='Baseline-subtracted dF/F',
+    )
+    axes[1, 0].legend()
+
+    correlations = np.full(tuning_mean.shape[2], np.nan)
+    for roi_index in range(tuning_mean.shape[2]):
+        first = tuning_mean[0, :, roi_index]
+        second = tuning_mean[1, :, roi_index]
+        finite = np.isfinite(first) & np.isfinite(second)
+        if finite.sum() >= 3 and np.std(first[finite]) > 0 and np.std(second[finite]) > 0:
+            correlations[roi_index] = np.corrcoef(first[finite], second[finite])[0, 1]
+    axes[1, 1].hist(correlations[np.isfinite(correlations)], bins=np.linspace(-1, 1, 21))
+    median_correlation = np.nanmedian(correlations)
+    axes[1, 1].axvline(median_correlation, color='black', linestyle='--')
+    axes[1, 1].set(
+        title=f'Cross-block tuning reliability (median r={median_correlation:.2f})',
+        xlabel='Pearson r across directions',
+        ylabel='ROI count',
+        xlim=(-1, 1),
+    )
+
+    count_range = (
+        int(metrics['presentation_counts'].min()),
+        int(metrics['presentation_counts'].max()),
+    )
+    fig.suptitle(
+        f'{series_name} orientation tuning | {metrics["n_presentations"]} presentations | '
+        f'{count_range[0]}-{count_range[1]} repeats/direction/block\n'
+        f'baseline {metrics["baseline_window"]} s, response {metrics["response_window"]} s',
+        fontweight='bold',
+    )
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def _save_orientation_roi_grid(series_name, metrics, output_path):
+    n_rois = metrics['tuning_mean'].shape[2]
+    n_columns = 6
+    n_rows = int(np.ceil(n_rois / n_columns))
+    fig, axes = plt.subplots(
+        n_rows, n_columns, figsize=(18, 2.6 * n_rows),
+        sharex=True, squeeze=False, constrained_layout=True,
+    )
+    colors = ('tab:blue', 'tab:orange')
+    for roi_index, axis in enumerate(axes.flat):
+        if roi_index >= n_rois:
+            axis.axis('off')
+            continue
+        for block_index, block_value in enumerate(metrics['block_values']):
+            axis.errorbar(
+                metrics['orientations'],
+                metrics['tuning_mean'][block_index, :, roi_index],
+                yerr=metrics['tuning_sem'][block_index, :, roi_index],
+                color=colors[block_index],
+                marker='o',
+                markersize=2.5,
+                linewidth=1,
+                label=f'Block {block_value}' if roi_index == 0 else None,
+            )
+        axis.axhline(0, color='0.7', linewidth=0.7)
+        axis.set_title(f'ROI {roi_index}', fontsize=8)
+        axis.tick_params(labelsize=7)
+    axes[0, 0].legend(fontsize=7)
+    for axis in axes[-1]:
+        axis.set_xlabel('Direction (deg)', fontsize=8)
+    fig.supylabel('Baseline-subtracted dF/F')
+    fig.suptitle(f'{series_name} per-ROI orientation tuning', fontweight='bold')
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
 def _save_stim_tuning_dashboard(channel_name, epochs, metrics, roi_groups, output_path):
@@ -425,3 +660,49 @@ def compute_stim_tuning_qc(
                 output_path,
             )
             print(f'Stim tuning QC: saved {output_path}')
+
+
+def compute_orientation_tuning_qc(qc_folder, nwb_path):
+    """Compute two-block orientation tuning plots for all packaged dF/F series."""
+    output_folder = Path(qc_folder) / 'orientation_tuning'
+    output_folder.mkdir(exist_ok=True)
+
+    nwb_path = Path(nwb_path)
+    io_class = hdmf_zarr.NWBZarrIO if nwb_path.is_dir() else pynwb.NWBHDF5IO
+    with io_class(str(nwb_path), mode='r') as io:
+        nwbfile = io.read()
+        if _ORIENTATION_TABLE not in nwbfile.intervals:
+            print(f'Orientation tuning QC: no {_ORIENTATION_TABLE} table; skipping.')
+            return
+        if 'ophys' not in nwbfile.processing:
+            print('Orientation tuning QC: no ophys processing module; skipping.')
+            return
+
+        stim_df = nwbfile.intervals[_ORIENTATION_TABLE].to_dataframe()
+        block_values = np.sort(stim_df['BlockNumber'].unique())
+        if len(block_values) != 2:
+            print(
+                f'Orientation tuning QC: expected two control blocks, found '
+                f'{len(block_values)}; skipping.'
+            )
+            return
+
+        ophys = nwbfile.processing['ophys']
+        for interface in ophys.data_interfaces.values():
+            if not isinstance(interface, pynwb.ophys.Fluorescence):
+                continue
+            for series_name, series in interface.roi_response_series.items():
+                if not _is_dff_series(series_name):
+                    continue
+                metrics = _calculate_orientation_tuning(
+                    stim_df,
+                    np.asarray(series.data),
+                    np.asarray(series.timestamps),
+                )
+                summary_path = output_folder / f'{series_name}_orientation_summary.png'
+                roi_path = output_folder / f'{series_name}_orientation_rois.png'
+                _save_orientation_summary(series_name, metrics, summary_path)
+                _save_orientation_roi_grid(series_name, metrics, roi_path)
+                print(
+                    f'Orientation tuning QC: saved {summary_path} and {roi_path}'
+                )

@@ -13,6 +13,7 @@ import slap2_synching as slap2_sync
 import slap2_running_packaging as running_packaging
 import slap2_eye_tracking_packaging as eye_tracking_packaging
 import slap2_receptive_fields_qc as slap2_rf_qc
+import slap2_dff_qc
 import stim_tuning_qc
 import json
 import pandas as pd
@@ -329,8 +330,11 @@ def main():
         ensure_was_generated_by(nwbfile)
         nwb_io.write(nwbfile)
     packaging_end_time = datetime.now().astimezone()
+    slap2_dff_qc.compute_dff_qc(qc_folder, result_nwb_path)
+    slap2_dff_qc.compute_raw_fluorescence_qc(qc_folder, result_nwb_path)
     slap2_rf_qc.compute_receptive_field_qc(qc_folder, result_nwb_path, onset_delay=rf_onset_delay)
     stim_tuning_qc.compute_stim_tuning_qc(qc_folder, result_nwb_path)
+    stim_tuning_qc.compute_orientation_tuning_qc(qc_folder, result_nwb_path)
     write_data_process(
         session_path=session_path,
         processed_path=processed_path,
