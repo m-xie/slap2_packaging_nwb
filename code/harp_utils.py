@@ -117,7 +117,7 @@ def extract_harp(harp_path, expected_n_trials=None):
 
 
 def trim_leading_trial_pulse_artifact(harp_data):
-    """Remove a very short leading SLAP2 start/end pulse pair."""
+    """Remove a very short leading SLAP2 pulse pair and its DO2 events."""
     starts = harp_data["normalized_slap2_start"]
     ends = harp_data["normalized_slap2_end"]
     n_complete_trials = min(len(starts), len(ends))
@@ -144,6 +144,22 @@ def trim_leading_trial_pulse_artifact(harp_data):
         "normalized_slap2_end",
     ):
         trimmed[key] = harp_data[key][1:]
+
+    # DO2 events emitted by the aborted acquisition must be removed with its
+    # DO0/DO1 pair or the legacy stimulus table gains an unmatched onset.
+    first_retained_start = starts[1]
+    grating_times = harp_data.get("grating_times")
+    if grating_times is not None:
+        retained_gratings = np.asarray(grating_times)[
+            np.asarray(grating_times) >= first_retained_start
+        ]
+        trimmed["grating_times"] = retained_gratings
+        trimmed["normalized_start_gratings"] = retained_gratings
+        if "grating_signal" in harp_data:
+            retained_mask = np.asarray(grating_times) >= first_retained_start
+            trimmed["grating_signal"] = np.asarray(
+                harp_data["grating_signal"]
+            )[retained_mask]
 
     warnings.warn(
         "Removed erroneous leading SLAP2 pulse pair: "

@@ -9,12 +9,15 @@ from aind_data_schema_models.process_names import ProcessName
 from datetime import datetime
 from pathlib import Path
 import harp_utils
+import stimulus_sync
+from slap2_dat_utils import parse_dat_file, validate_dat_files
 import slap2_synching as slap2_sync
 import slap2_running_packaging as running_packaging
 import slap2_eye_tracking_packaging as eye_tracking_packaging
 import slap2_receptive_fields_qc as slap2_rf_qc
 import slap2_dff_qc
 import stim_tuning_qc
+import zebra_movie_qc
 import json
 import pandas as pd
 import argparse
@@ -204,6 +207,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_session_dir", type=str, default="slap2_session")
     parser.add_argument("--input_processed_dir", type=str, default="slap2_processed")
+    parser.add_argument("--stim_table_pattern", type=str, default="orientations_orientations0")
     parser.add_argument("--input_eye_tracking_dir", type=str, default="eye_tracking")
     parser.add_argument("--input_nwb_dir", type=str, default=f'nwb')
     parser.add_argument("--use_input_nwb", type=str, default="false")
@@ -212,14 +216,18 @@ def main():
     parser.add_argument("--expected_n_trials", type=int, default=None)
     parser.add_argument("--rf_onset_delay", type=float, default=0.2,
                         help="Onset delay in seconds for RF response windows (default: 0.2)")
+    parser.add_argument("--qc_folder_name", type=str, default="qc")
     args = parser.parse_args()
     use_input_nwb = args.use_input_nwb.lower() in ('t', 'true')
     allow_skip_running = args.allow_skip_running.lower() in ('t', 'true')
     allow_skip_eye = args.allow_skip_eye.lower() in ('t', 'true')
     expected_n_trials = args.expected_n_trials
     rf_onset_delay = args.rf_onset_delay
+    qc_folder_name = args.qc_folder_name
     input_nwb_dir = data_folder / Path(args.input_nwb_dir)
     session_path = Path(args.input_session_dir)
+    stim_table_pattern = args.stim_table_pattern
+    print("stim table name substring to look for:",stim_table_pattern)
     if not session_path.is_absolute():
         session_path = data_folder / session_path
     processed_path = Path(args.input_processed_dir)
@@ -272,8 +280,14 @@ def main():
     acquisition_json_path = next(session_path.glob("acquisition.json"))
     harp_path = next(session_path.rglob('*.harp'))
     experiment_summary_path = next(processed_path.rglob('*experiment_summary.h5'))
-    orientations_csv = next((session_path / 'behavior').rglob('orientations_orientations0.csv'))
-    log_csv = next((session_path / 'behavior').rglob('orientations_logger.csv'))
+    stim_table_csv = next((session_path / 'behavior').rglob(f'*{stim_table_pattern}*.csv'))
+    try:
+        log_csv = stimulus_sync.select_stimulus_logger(
+            (session_path / 'behavior').rglob('*logger*.csv')
+        )
+    except FileNotFoundError:
+        log_csv = None
+    print('using stimulus logger:', log_csv)
     eye_tracking_paths = find_eye_tracking_paths(eye_tracking_path, processed_path)
     eye_camera_metadata_path = session_path / 'behavior-videos' / 'EyeCamera' / 'metadata.csv'
 
@@ -293,11 +307,13 @@ def main():
             harp_data = harp_utils.extract_harp(harp_path)
             harp_data = harp_utils.trim_leading_trial_pulse_artifact(harp_data)
             harp_data, exclude_final_trial = trim_unterminated_harp_trial(harp_data)
-            qc_folder = results_folder / 'qc'
+            qc_folder = results_folder / qc_folder_name
             qc_folder.mkdir(exist_ok=True)
             (qc_folder / 'syncing').mkdir(exist_ok=True)
             stimulus_start_time = datetime.now().astimezone()
-            add_stim_table(nwbfile, orientations_csv, log_csv, harp_data)
+            stimulus_timing_metadata = add_stim_table(
+                nwbfile, stim_table_csv, log_csv, harp_data
+            )
             stimulus_end_time = datetime.now().astimezone()
             ophys_start_time = datetime.now().astimezone()
             add_ophys_to_nwb(
@@ -332,6 +348,9 @@ def main():
     packaging_end_time = datetime.now().astimezone()
     slap2_dff_qc.compute_dff_qc(qc_folder, result_nwb_path)
     slap2_dff_qc.compute_raw_fluorescence_qc(qc_folder, result_nwb_path)
+    zebra_movie_qc.plot_zebra_repeats(
+        result_nwb_path, qc_folder / 'zebra_movie'
+    )
     slap2_rf_qc.compute_receptive_field_qc(qc_folder, result_nwb_path, onset_delay=rf_onset_delay)
     stim_tuning_qc.compute_stim_tuning_qc(qc_folder, result_nwb_path)
     stim_tuning_qc.compute_orientation_tuning_qc(qc_folder, result_nwb_path)
@@ -352,6 +371,7 @@ def main():
             "allow_skip_eye": allow_skip_eye,
             "expected_n_trials": expected_n_trials,
             "rf_onset_delay": rf_onset_delay,
+            "stimulus_timing": stimulus_timing_metadata,
         },
     )
     print(f'Wrote output slap2 nwb to {result_nwb_path}')
@@ -370,6 +390,79 @@ def get_expected_n_frames(experiment_summary):
     trial_num_frames = experiment_summary['DMD1']['frame_info']['trial_num_frames']
     assert len(trial_num_frames) == len(experiment_summary['DMD2']['frame_info']['trial_num_frames']), 'DMDs have different numbers of trials'
     return len(trial_num_frames)
+
+
+def infer_continuous_slap2_mode(experiment_summary, plane_inputs, harp_data):
+    """Identify one raw SLAP2 trial split into source-extraction chunks."""
+    if (
+        len(harp_data['normalized_slap2_start']) != 1
+        or len(harp_data['normalized_slap2_end']) != 1
+    ):
+        return False
+
+    parsed_dat_files = [
+        parse_dat_file(dat_path)
+        for _, _, _, _, dat_paths, _ in plane_inputs
+        for dat_path in dat_paths
+    ]
+    if not parsed_dat_files:
+        return False
+    if len({dat_file.acquisition_prefix.lower() for dat_file in parsed_dat_files}) != 1:
+        return False
+    if any(dat_file.cycle_offset is None for dat_file in parsed_dat_files):
+        return False
+
+    dmd_trial_numbers = {}
+    for dat_file in parsed_dat_files:
+        dmd_trial_numbers.setdefault(dat_file.dmd_number, set()).add(
+            dat_file.trial_number
+        )
+    if not dmd_trial_numbers or any(
+        trial_numbers != {1} for trial_numbers in dmd_trial_numbers.values()
+    ):
+        return False
+
+    for plane, _, _, _, _, n_summary_trials in plane_inputs:
+        if n_summary_trials <= 1:
+            return False
+        frame_info = experiment_summary[plane]['frame_info']
+        trial_num_frames = np.asarray(
+            frame_info['trial_num_frames'][()]
+        ).reshape(-1)
+        frame_line_idxs = np.asarray(
+            frame_info['frame_line_idxs'][()]
+        ).reshape(-1)
+        if int(np.sum(trial_num_frames)) != len(frame_line_idxs):
+            return False
+
+        boundaries = np.concatenate([[0], np.cumsum(trial_num_frames)])
+        nonempty_chunks = []
+        positive_steps = []
+        for chunk_idx, n_frames in enumerate(trial_num_frames):
+            if n_frames == 0:
+                continue
+            chunk = frame_line_idxs[
+                boundaries[chunk_idx]:boundaries[chunk_idx + 1]
+            ].astype(np.int64, copy=False)
+            nonempty_chunks.append(chunk)
+            chunk_steps = np.diff(chunk)
+            positive_steps.extend(chunk_steps[chunk_steps > 0])
+
+        if len(nonempty_chunks) <= 1 or not positive_steps:
+            return False
+        max_continuation_gap = 1.5 * float(np.percentile(positive_steps, 99))
+        if int(nonempty_chunks[0][0]) < 1:
+            return False
+        boundary_gaps = [
+            int(current[0]) - int(previous[-1])
+            for previous, current in zip(nonempty_chunks, nonempty_chunks[1:])
+        ]
+        if any(
+            gap <= 0 or gap > max_continuation_gap for gap in boundary_gaps
+        ):
+            return False
+
+    return True
 
 
 def trim_unterminated_harp_trial(harp_data):
@@ -431,6 +524,16 @@ def read_stim_csv(filepath):
         'spatial_frequency':  'SpatialFrequency',
         'temporal_frequency': 'TemporalFrequency',
         'orientation':        'Orientation',
+        'Block_Number':       'BlockNumber',
+        'Block_Label':        'BlockLabel',
+        'Block_Duration_Minutes': 'BlockDurationMinutes',
+        'Trial_Number':       'TrialNumber',
+        'Sequence_Number':    'SequenceNumber',
+        'Trial_In_Sequence':  'TrialInSequence',
+        'Spatial_Frequency':  'SpatialFrequency',
+        'Temporal_Frequency': 'TemporalFrequency',
+        'Trial_Type':         'TrialType',
+        'Block_Type':         'BlockType',
     }
 
     with open(filepath, newline='') as f:
@@ -461,54 +564,59 @@ def read_stim_csv(filepath):
         df = df.drop(columns=['diameter'])
         df = df.rename(columns=_OLD_TO_NEW_RENAMES)
 
+    # Normalize the newer underscore-delimited table schema once rather than
+    # branching throughout NWB interval construction and downstream QC.
+    conflicting_columns = [
+        old_name
+        for old_name, new_name in _OLD_TO_NEW_RENAMES.items()
+        if old_name in df.columns and new_name in df.columns
+    ]
+    if conflicting_columns:
+        raise ValueError(
+            "Stimulus table contains both legacy and canonical columns for: "
+            f"{conflicting_columns}"
+        )
+    df = df.rename(columns=_OLD_TO_NEW_RENAMES)
+
     return df
 
 
 def add_stim_table(nwbfile, orientations_table, log_csv, harp_data):
-    gratings_df = read_stim_csv(orientations_table)
-
-    log_df = pd.read_csv(log_csv)
-    # spacebar_time = np.array(log_df.loc[log_df['Value'] == 'SPACEBAR', 'Timestamp'].tolist())[0]
+    stimulus_df = read_stim_csv(orientations_table)
 
     slap2_start_times = harp_data['normalized_slap2_start']
     slap2_end_times = harp_data['normalized_slap2_end']
-    # any gratings before the spacebar are erroneous (digital line is noisy perhaps)
-    # start_gratings_times = np.array([t for t in harp_data['normalized_start_gratings'] if t >= spacebar_time])
-    start_gratings_times = harp_data['normalized_start_gratings']
-
-    # We check there are as many gratings presentation as there are timing data in HARP, tolerate a small difference and truncate
-    diff = len(gratings_df) - len(start_gratings_times)
-    if abs(diff) > 3:
-        raise ValueError(
-            f"Mismatch between number of grating presentations {len(gratings_df)} "
-            f"and HARP timing data {len(start_gratings_times)}"
+    stimulus_start_times, timing_metadata = (
+        stimulus_sync.resolve_stimulus_start_times(
+            len(stimulus_df), harp_data, log_csv
         )
-    elif diff > 0:
-        # gratings_df has more entries — trim from the beginning
-        gratings_df = gratings_df.iloc[diff:].reset_index(drop=True)
-    elif diff < 0:
-        # start_gratings_times has more entries — trim from the beginning
-        start_gratings_times = start_gratings_times[-diff:]
+    )
+    print('stimulus timing:', timing_metadata)
     
     start_time = []
     stop_time = []
     slap2_trial_idxs = []
-    for i, row in gratings_df.iterrows():
-        start_time.append(start_gratings_times[i])
-        stop_time.append(start_gratings_times[i] + row['Duration'])
-        slap2_trial_idxs.append(find_slap2_trial_index(start_gratings_times[i], slap2_start_times, slap2_end_times))
-    gratings_df['slap2_trial_idx'] = slap2_trial_idxs
+    for i, row in stimulus_df.iterrows():
+        stimulus_start = stimulus_start_times[i]
+        start_time.append(stimulus_start)
+        stop_time.append(stimulus_start + row['Duration'])
+        slap2_trial_idxs.append(
+            find_slap2_trial_index(
+                stimulus_start, slap2_start_times, slap2_end_times
+            )
+        )
+    stimulus_df['slap2_trial_idx'] = slap2_trial_idxs
 
     # Attach timing columns so they travel with the df during splitting
-    gratings_df['start_time'] = start_time
-    gratings_df['stop_time']  = stop_time
+    stimulus_df['start_time'] = start_time
+    stimulus_df['stop_time'] = stop_time
 
     # Split by BlockType and add each block as its own TimeIntervals table
-    if 'BlockType' in gratings_df.columns:
-        block_groups = gratings_df.groupby('BlockType', sort=False)
+    if 'BlockType' in stimulus_df.columns:
+        block_groups = stimulus_df.groupby('BlockType', sort=False)
     else:
         # No BlockType column — fall back to a single 'gratings' table
-        block_groups = [('gratings', gratings_df)]
+        block_groups = [('gratings', stimulus_df)]
 
     for block_name, block_df in block_groups:
         block_df = block_df.reset_index(drop=True)
@@ -537,6 +645,8 @@ def add_stim_table(nwbfile, orientations_table, log_csv, harp_data):
 
         nwbfile.add_time_intervals(table)
         print(f"Added intervals table '{block_name}' with {len(block_df)} rows and {len(block_df.columns)} columns")
+
+    return timing_metadata
 
 
 def create_optical_channel(acquisition, imaging_channel, dmd_name):
@@ -683,24 +793,12 @@ def resolve_slap2_acquisition(
     count and .dat evidence consistent for downstream synchronization across all
     DMDs.
     """
-    dat_pattern = re.compile(
-        r'^(?P<prefix>.+_(?P<timestamp>\d{8}_\d{6}))_DMD'
-        r'(?P<dmd>\d+)-TRIAL(?P<trial>\d+)\.dat$',
-        re.IGNORECASE,
-    )
     acquisition_groups = {}
     for dat_path in dat_paths:
-        match = dat_pattern.match(dat_path.name)
-        if match is None:
-            raise ValueError(
-                f"Unsupported SLAP2 .dat filename format: {dat_path.name}. Expected "
-                f"<label>_YYYYMMDD_HHMMSS_DMD<number>-TRIAL<number>.dat; the label "
-                f"may be any text, such as 'acquisition' or 'activity'."
-            )
-        prefix = match.group('prefix')
-        acquisition_groups.setdefault(prefix, []).append(
-            (int(match.group('dmd')), int(match.group('trial')), dat_path)
-        )
+        dat_file = parse_dat_file(dat_path)
+        acquisition_groups.setdefault(
+            dat_file.acquisition_prefix, []
+        ).append(dat_file)
 
     if not acquisition_groups:
         raise ValueError("No SLAP2 .dat files were found.")
@@ -711,24 +809,21 @@ def resolve_slap2_acquisition(
             f"one earlier acquisition followed by one retained acquisition."
         )
 
-    for prefix, entries in acquisition_groups.items():
-        dmd_trials = [(dmd_num, trial_num) for dmd_num, trial_num, _ in entries]
-        if len(set(dmd_trials)) != len(dmd_trials):
-            raise ValueError(f"Duplicate DMD/trial numbers found within {prefix}.")
-
     ordered_groups = sorted(
         acquisition_groups.items(),
         key=lambda item: datetime.strptime(
-            re.search(r'(\d{8}_\d{6})$', item[0]).group(1), '%Y%m%d_%H%M%S'
+            item[1][0].acquisition_timestamp, '%Y%m%d_%H%M%S'
         ),
     )
-    selected_prefix, selected_entries = ordered_groups[-1]
+    selected_prefix, selected_dat_files = ordered_groups[-1]
 
     if len(ordered_groups) == 1:
         excluded_trial_count = 0
     else:
-        excluded_prefix, excluded_entries = ordered_groups[0]
-        excluded_trial_count = max(trial_num for _, trial_num, _ in excluded_entries)
+        excluded_prefix, excluded_dat_files = ordered_groups[0]
+        excluded_trial_count = max(
+            dat_file.trial_number for dat_file in excluded_dat_files
+        )
         retained_trial_count = (
             n_summary_trials - excluded_trial_count - excluded_trailing_trials
         )
@@ -755,7 +850,16 @@ def resolve_slap2_acquisition(
     retained_trial_count = (
         n_summary_trials - excluded_trial_count - excluded_trailing_trials
     )
-    selected_trial_numbers = [trial_num for _, trial_num, _ in selected_entries]
+    # Aborted acquisitions and excluded trailing trials are often incomplete;
+    # only retained files can influence downstream synchronization.
+    validate_dat_files([
+        dat_file.path
+        for dat_file in selected_dat_files
+        if dat_file.trial_number <= retained_trial_count
+    ], slap2_sync.read_dat_num_cycles)
+    selected_trial_numbers = [
+        dat_file.trial_number for dat_file in selected_dat_files
+    ]
     invalid_trial_numbers = [
         trial_num for trial_num in selected_trial_numbers
         if trial_num < 1
@@ -807,30 +911,33 @@ def filter_slap2_acquisition(
     acquisition_resolution,
 ):
     """Apply shared leading and trailing trial exclusions to one DMD."""
-    dat_pattern = re.compile(
-        r'^(?P<prefix>.+_(?P<timestamp>\d{8}_\d{6}))_DMD'
-        rf'{int(dmd_num)}-TRIAL(?P<trial>\d+)\.dat$',
-        re.IGNORECASE,
-    )
     selected_prefix = acquisition_resolution['acquisition_prefix']
     n_excluded_trials = acquisition_resolution['excluded_trial_count']
     n_excluded_trailing_trials = acquisition_resolution['excluded_trailing_trials']
     retained_trial_count = acquisition_resolution['retained_trial_count']
-    selected_entries = []
+    selected_dat_files = []
     for dat_path in dat_paths:
-        match = dat_pattern.match(dat_path.name)
-        if match is None:
+        dat_file = parse_dat_file(dat_path)
+        if dat_file.dmd_number != int(dmd_num):
             raise ValueError(
-                f"Unsupported DMD{dmd_num} .dat filename format: {dat_path.name}. "
-                f"Expected <label>_YYYYMMDD_HHMMSS_DMD{int(dmd_num)}-"
-                f"TRIAL<number>.dat."
+                f"Expected a DMD{dmd_num} .dat file, found DMD"
+                f"{dat_file.dmd_number} in {dat_path.name}."
             )
-        if match.group('prefix').lower() == selected_prefix.lower():
-            selected_entries.append((int(match.group('trial')), dat_path))
+        if dat_file.acquisition_prefix.lower() == selected_prefix.lower():
+            selected_dat_files.append(dat_file)
 
-    selected_trial_numbers = [trial for trial, _ in selected_entries]
-    if len(set(selected_trial_numbers)) != len(selected_trial_numbers):
-        raise ValueError(f"Duplicate trial numbers found within {selected_prefix} for DMD{dmd_num}.")
+    selected_trial_cycles = [
+        (dat_file.trial_number, dat_file.cycle_offset)
+        for dat_file in selected_dat_files
+    ]
+    if len(set(selected_trial_cycles)) != len(selected_trial_cycles):
+        raise ValueError(
+            f"Duplicate trial/cycle numbers found within {selected_prefix} "
+            f"for DMD{dmd_num}."
+        )
+    selected_trial_numbers = [
+        dat_file.trial_number for dat_file in selected_dat_files
+    ]
     available_trial_count = retained_trial_count + n_excluded_trailing_trials
     invalid_trial_numbers = [
         trial for trial in selected_trial_numbers
@@ -880,9 +987,18 @@ def filter_slap2_acquisition(
         'acquisition_prefix': selected_prefix,
         'excluded_trial_count': n_excluded_trials,
         'dat_paths': [
-            path
-            for trial, path in sorted(selected_entries)
-            if trial <= retained_trial_count
+            dat_file.path
+            # Synchronization expects chunks grouped by logical trial and then
+            # ordered by their starting cycle, regardless of filesystem order.
+            for dat_file in sorted(
+                selected_dat_files,
+                key=lambda item: (
+                    item.trial_number,
+                    -1 if item.cycle_offset is None else item.cycle_offset,
+                    item.path.name,
+                ),
+            )
+            if dat_file.trial_number <= retained_trial_count
         ],
         'meta_path': selected_meta_paths[0],
         'trial_num_frames': trial_num_frames[n_excluded_trials:trial_end],
@@ -893,7 +1009,7 @@ def filter_slap2_acquisition(
     }
 
 
-def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, harp_data, trial_line_time_maps=None, primary_qc=None, qc_folder=None, dat_paths=None, plane_key=None, acquisition_resolution=None):
+def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, harp_data, trial_line_time_maps=None, primary_qc=None, qc_folder=None, dat_paths=None, plane_key=None, acquisition_resolution=None, continuous_mode=False):
     plane_key = plane_key or dmd_name
     """
     Extract fluorescence traces and compute HARP-aligned timestamps for one SLAP2 DMD plane.
@@ -946,6 +1062,11 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
 
     frame_line_idxs  = dmd_group['frame_info']['frame_line_idxs'][0]
     trial_num_frames = dmd_group['frame_info']['trial_num_frames'][()][0]
+    processing_chunk_num_frames = trial_num_frames.copy()
+    if continuous_mode:
+        trial_num_frames = np.asarray(
+            [np.sum(trial_num_frames)], dtype=trial_num_frames.dtype
+        )
     if acquisition_resolution is None:
         acquisition_resolution = resolve_slap2_acquisition(dat_paths, len(trial_num_frames))
     filtered = filter_slap2_acquisition(
@@ -1004,12 +1125,14 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
             harp_data['slap2_cycle_clock_times'],
             trial_num_cycles=trial_num_cycles,
             highest_dat_trial=acquisition_resolution['highest_dat_trial'],
+            first_trial_start=harp_data['normalized_slap2_start'][0],
         )
         print(f"PRODUCED {len(timestamps)} SLAP2 TIMESTAMPS for {len(f0_data)} (DMD{dmd_num})")
         plane_qc = {
             'raw_frame_line_idxs': raw_frame_line_idxs,
             'frame_line_idxs': frame_line_idxs,
             'trial_num_frames': trial_num_frames,
+            'processing_chunk_num_frames': processing_chunk_num_frames,
             'lines_per_cycle': lines_per_cycle,
             'timestamps': timestamps,
             'trial_line_time_maps': out_maps,
@@ -1028,6 +1151,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
             'raw_frame_line_idxs': raw_frame_line_idxs,
             'frame_line_idxs': frame_line_idxs,
             'trial_num_frames': trial_num_frames,
+            'processing_chunk_num_frames': processing_chunk_num_frames,
             'timestamps': timestamps,
             'line_index_corrections': line_index_corrections,
             'acquisition_prefix': filtered['acquisition_prefix'],
@@ -1257,9 +1381,18 @@ def add_ophys_to_nwb(
         for _, _, _, _, dat_paths, _ in source_plane_inputs
         for dat_path in dat_paths
     ]
+    continuous_mode = infer_continuous_slap2_mode(
+        experiment_summary, source_plane_inputs, harp_data
+    )
+    effective_trial_count = 1 if continuous_mode else summary_trial_counts.pop()
+    if continuous_mode:
+        print(
+            "Continuous SLAP2 mode inferred: treating source-extraction chunks "
+            "as one acquisition trial."
+        )
     acquisition_resolution = resolve_slap2_acquisition(
         all_dat_paths,
-        summary_trial_counts.pop(),
+        effective_trial_count,
         excluded_trailing_trials=int(exclude_final_trial),
     )
 
@@ -1279,6 +1412,7 @@ def add_ophys_to_nwb(
             dat_paths=dat_paths,
             plane_key=plane,
             acquisition_resolution=acquisition_resolution,
+            continuous_mode=continuous_mode,
         )
         if selected_acquisition_prefix is None:
             selected_acquisition_prefix = plane_qc['acquisition_prefix']

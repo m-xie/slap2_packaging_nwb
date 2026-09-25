@@ -66,7 +66,12 @@ def _save_series_plot(series_name, times, repeats, output_path):
 
 
 def _finite_correlation(first, second):
-    """Return Pearson correlation using finite paired samples."""
+    """Return Pearson r using finite paired time bins.
+
+    Pearson r is the normalized sum of products
+    ``(repeat1 - mean1) * (repeat2 - mean2)``. Subtracting the two centered
+    traces would measure difference, not similarity of response shape.
+    """
     finite = np.isfinite(first) & np.isfinite(second)
     if finite.sum() < 2:
         return np.nan
@@ -75,6 +80,79 @@ def _finite_correlation(first, second):
     if np.std(first_values) == 0 or np.std(second_values) == 0:
         return np.nan
     return float(np.corrcoef(first_values, second_values)[0, 1])
+
+
+def _repeat_windows(zebra_rows):
+    """Return starts and duration for combined or explicitly separated repeats."""
+    if len(zebra_rows) == 1:
+        zebra = zebra_rows.iloc[0]
+        repeat_duration = float(zebra["stop_time"] - zebra["start_time"]) / 2
+        repeat_starts = [
+            float(zebra["start_time"]),
+            float(zebra["start_time"]) + repeat_duration,
+        ]
+    elif len(zebra_rows) == 2:
+        durations = (
+            zebra_rows["stop_time"].to_numpy(dtype=float)
+            - zebra_rows["start_time"].to_numpy(dtype=float)
+        )
+        if not np.isclose(durations[0], durations[1], rtol=0.01):
+            raise ValueError(
+                "The two Zebra repeat intervals must have equal durations"
+            )
+        repeat_duration = float(np.mean(durations))
+        repeat_starts = zebra_rows["start_time"].to_numpy(dtype=float).tolist()
+    else:
+        raise ValueError(
+            f"Expected one combined or two separate Zebra intervals, "
+            f"found {len(zebra_rows)}"
+        )
+    if repeat_duration <= 0:
+        raise ValueError("Zebra repeat duration must be positive")
+    return repeat_starts, repeat_duration
+
+
+def _save_roi_correlation_plot(series_name, roi_correlations, output_path):
+    """Plot repeat-to-repeat Pearson correlation for every ROI."""
+    roi_correlations = np.asarray(roi_correlations, dtype=float)
+    roi_indices = np.arange(len(roi_correlations))
+    finite = np.isfinite(roi_correlations)
+
+    figure, axis = plt.subplots(figsize=(12, 4.5), constrained_layout=True)
+    axis.scatter(
+        roi_indices[finite],
+        roi_correlations[finite],
+        s=12,
+        color="#1876a3",
+        alpha=0.8,
+        edgecolors="none",
+    )
+    if np.any(~finite):
+        axis.scatter(
+            roi_indices[~finite],
+            np.zeros(np.count_nonzero(~finite)),
+            marker="x",
+            s=18,
+            color="#888888",
+            label="Undefined correlation",
+        )
+    axis.axhline(0, color="black", linewidth=0.8, alpha=0.6)
+    if finite.any():
+        median_correlation = float(np.median(roi_correlations[finite]))
+        axis.axhline(
+            median_correlation,
+            color="#b33b2e",
+            linestyle="--",
+            linewidth=1.2,
+            label=f"Median r = {median_correlation:.3f}",
+        )
+    axis.set(xlabel="ROI index", ylabel="Repeat 1 vs repeat 2 Pearson r", ylim=(-1.05, 1.05))
+    axis.set_title(f"{series_name}: Zebra repeat response reliability")
+    axis.grid(axis="y", alpha=0.2, linewidth=0.5)
+    if finite.any() or np.any(~finite):
+        axis.legend(loc="lower right", fontsize=8)
+    figure.savefig(output_path, dpi=150)
+    plt.close(figure)
 
 
 def _save_repeat_rasters(series_name, times, repeats, output_path):
@@ -133,7 +211,7 @@ def _save_repeat_rasters(series_name, times, repeats, output_path):
 
 
 def plot_zebra_repeats(nwb_path, output_folder, bin_size=0.1):
-    """Plot two equal repeats contained in the single Zebra movie interval."""
+    """Plot two equal Zebra repeats and their per-ROI response reliability."""
     nwb_path = Path(nwb_path)
     output_folder = Path(output_folder)
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -141,17 +219,18 @@ def plot_zebra_repeats(nwb_path, output_folder, bin_size=0.1):
 
     with io_class(str(nwb_path), mode="r") as io:
         nwbfile = io.read()
+        if "movie" not in nwbfile.intervals:
+            print("Zebra QC: no movie interval table found; skipping.")
+            return
         movie_table = nwbfile.intervals["movie"].to_dataframe()
+        if "BlockLabel" not in movie_table.columns:
+            print("Zebra QC: movie table has no BlockLabel column; skipping.")
+            return
         zebra_rows = movie_table.loc[movie_table["BlockLabel"] == "Zebra"]
-        if len(zebra_rows) != 1:
-            raise ValueError(f"Expected one Zebra interval, found {len(zebra_rows)}")
-
-        zebra = zebra_rows.iloc[0]
-        repeat_duration = float(zebra["stop_time"] - zebra["start_time"]) / 2
-        repeat_starts = [
-            float(zebra["start_time"]),
-            float(zebra["start_time"]) + repeat_duration,
-        ]
+        if len(zebra_rows) == 0:
+            print("Zebra QC: no Zebra movie intervals found; skipping.")
+            return
+        repeat_starts, repeat_duration = _repeat_windows(zebra_rows)
 
         for interface in nwbfile.processing["ophys"].data_interfaces.values():
             if not isinstance(interface, pynwb.ophys.Fluorescence):
@@ -182,6 +261,14 @@ def plot_zebra_repeats(nwb_path, output_folder, bin_size=0.1):
                     f"(global r={global_correlation:.3f}, "
                     f"median ROI r={np.nanmedian(roi_correlations):.3f})"
                 )
+                correlation_path = (
+                    output_folder
+                    / f"{series_name}_zebra_roi_correlations.png"
+                )
+                _save_roi_correlation_plot(
+                    series_name, roi_correlations, correlation_path
+                )
+                print(f"Zebra QC: saved {correlation_path}")
 
 
 if __name__ == "__main__":

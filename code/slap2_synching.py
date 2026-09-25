@@ -265,7 +265,9 @@ def get_trial_num_cycles(dat_paths, n_trials):
         if trial_idx < 0 or trial_idx >= n_trials:
             print(f'WARNING: trial index {trial_idx} in {dat_path.name} exceeds n_trials={n_trials}, skipping.')
             continue
-        trial_num_cycles[trial_idx] = read_dat_num_cycles(dat_path)
+        # Chunked acquisitions have several files for one logical trial. Legacy
+        # acquisitions have one, for which addition is equivalent to assignment.
+        trial_num_cycles[trial_idx] += read_dat_num_cycles(dat_path)
     n_missing = int(np.sum(trial_num_cycles == 0))
     if n_missing > 0:
         print(f'WARNING: {n_missing}/{n_trials} trials have no .dat file; numCycles set to 0 for those trials.')
@@ -1032,6 +1034,7 @@ def get_slap2_primary_plane_timestamps(
     gap_multiplier=5.0,
     trial_num_cycles=None,
     highest_dat_trial=None,
+    first_trial_start=None,
 ):
     """
     Align primary plane SLAP2 fluorescence samples to absolute HARP timestamps.
@@ -1095,6 +1098,9 @@ def get_slap2_primary_plane_timestamps(
         Highest trial number present among the selected acquisition's .dat files
         across all DMDs. Used only to corroborate removal of one unmatched leading
         HARP cycle group.
+    first_trial_start : float or None
+        First retained HARP DO0 timestamp. Cycle starts before this time are
+        excluded before applying the existing trial-assignment algorithm.
 
     Returns
     -------
@@ -1132,6 +1138,21 @@ def get_slap2_primary_plane_timestamps(
         slap2_cycle_clock_signal, slap2_cycle_clock_times
     )
     print(f"Primary plane: {len(cycle_starts)} cycles detected from HARP clock.")
+    removed_pre_trial_cycle_count = 0
+    if first_trial_start is not None:
+        keep_cycles = cycle_starts >= first_trial_start
+        removed_pre_trial_cycle_count = int(np.count_nonzero(~keep_cycles))
+        cycle_starts = cycle_starts[keep_cycles]
+        inter_cycle_periods = np.diff(cycle_starts)
+        if len(cycle_starts) == 0:
+            raise ValueError(
+                "No HARP cycle starts remain at or after the first SLAP2 trial start."
+            )
+        if removed_pre_trial_cycle_count:
+            print(
+                f"Excluded {removed_pre_trial_cycle_count} HARP cycles before "
+                f"the first SLAP2 trial start at {first_trial_start:.6f}."
+            )
 
     n_trials = len(primary_trial_num_frames)
     cycle_starts, inter_cycle_periods, reconciliation_qc = reconcile_cycle_clock_trials(
@@ -1140,6 +1161,9 @@ def get_slap2_primary_plane_timestamps(
         n_trials,
         highest_dat_trial,
         gap_multiplier=gap_multiplier,
+    )
+    reconciliation_qc['removed_pre_trial_cycle_count'] = (
+        removed_pre_trial_cycle_count
     )
     gap_threshold_qc = gap_multiplier * float(np.median(inter_cycle_periods))
 

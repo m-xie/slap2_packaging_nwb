@@ -42,6 +42,15 @@ class BinActivityTests(unittest.TestCase):
         self.assertTrue(np.isnan(binned[1:3]).all())
         np.testing.assert_allclose(binned[3], [9.0, 8.0])
 
+    def test_ignores_samples_with_nan_timestamps(self):
+        data = np.array([[1.0], [99.0], [3.0], [5.0]])
+        timestamps = np.array([0.0, np.nan, 0.05, 0.11])
+
+        binned, bin_centers = _bin_activity(data, timestamps, chunk_size=2)
+
+        np.testing.assert_allclose(binned, [[2.0], [5.0]])
+        np.testing.assert_allclose(bin_centers, [0.05, 0.15])
+
     def test_saves_all_series_in_one_png(self):
         timestamps = np.linspace(0.0, 10.0, 20)
         series = [

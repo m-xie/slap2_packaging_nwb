@@ -1,0 +1,275 @@
+SLAP2 NWB PACKAGING HANDOFF
+===========================
+Updated: 2026-09-25
+Workspace: /root/capsule
+Code: /root/capsule/code
+
+START HERE
+----------
+The packaging stack now supports both older trial-based P3 sessions and newer
+continuous Maedeh Zebra sessions. Logger-to-HARP stimulus alignment, chunked
+.dat handling, continuous-acquisition inference, pre-acquisition DI3 filtering,
+NWB packaging, and the full QC stack have all run successfully on mounted data.
+
+The worktree is dirty. Do not revert unrelated/user changes. Use apply_patch for
+manual edits and run a focused test immediately after the first edit.
+
+
+CURRENT DATASETS
+----------------
+Raw -> processed:
+
+  880917_2026-09-17_13-13-52
+    -> 880917_2026-09-17_13-13-52_source-extracted_2026-09-21_19-14-33
+
+  slap2_session (canonical session 880917_2026-09-17_14-43-15)
+    -> slap2_processed
+
+  828409_2025-11-11_14-41-13
+    -> 828409_2025-11-11_14-41-04_processed_2026-08-28_01-58-24
+
+  828409_2025-11-20_10-01-34
+    -> 828409_2025-11-20_10-01-34_processed_2026-07-08_17-26-36
+
+  828409_2025-11-21_11-14-03
+    -> 828409_2025-11-21_11-14-03_processed_2026-06-24_10-01-37
+
+Stimulus table patterns:
+
+  Maedeh sessions: zebra_only_2rep_session
+  P3 sessions:     orientations_orientations0
+
+No mounted session has ellipses_processed*.h5. Full runs used
+--allow_skip_eye true. Eye tracking was skipped, not failed.
+
+
+IMPLEMENTED SYNCHRONIZATION BEHAVIOR
+------------------------------------
+HARP signals:
+
+  DO0 = SLAP2 acquisition/trial start
+  DO1 = SLAP2 acquisition/trial end
+  DO2 = legacy P3 stimulus onset
+  DI3 = primary-plane SLAP2 cycle clock
+  AnalogInput0 = physical photodiode
+
+Stimulus timing:
+
+1. Legacy P3 behavior is preserved: when DO2 count equals stimulus-table row
+   count, DO2 timestamps remain authoritative.
+2. When DO2 is empty, logger stimulus times are mapped onto HARP time by an
+   affine fit to expected logger photodiode transitions and measured HARP
+   AnalogInput0 transitions.
+3. A nonempty but mismatched DO2 signal raises instead of silently falling back.
+4. Logger selection is deterministic: prefer a filename containing "dup";
+   otherwise use the first sorted logger path.
+5. Logger/HARP fit metadata is printed as "stimulus timing" and records source,
+   logger path, transition counts, frame rate, and residual statistics.
+
+Maedeh continuous acquisition handling:
+
+1. Source extraction can split one physical acquisition into many processing
+   chunks. These are collapsed only for synchronization; chunk frame counts are
+   retained separately.
+2. Continuous mode is inferred conservatively from one HARP DO0/DO1 pair, one
+   raw trial ID, cycle-chunked .dat files, and continuing line indices.
+3. A partial first extracted chunk may start at a positive line index other than
+   1. This is valid for continuous mode.
+4. Parsed DI3 rising edges before the first retained DO0 are removed before
+   cycle assignment. Do not remove or replace the historical gap-detection and
+   line-count reconciliation logic.
+5. Pre-bug-fix P3 sessions still use trial gap detection. Exact DI3/raw cycle
+   equality is not required; historical warning/clamping behavior is preserved.
+
+Chunked .dat support lives in slap2_dat_utils.py. TRIAL is the logical trial;
+CYCLE is a zero-based chunk offset, not a cycle count. Chunk continuity must
+satisfy:
+
+  next offset = current offset + cycles in current file
+
+Do not move parsing/validation back into run_capsule.py.
+
+
+IMPORTANT CODE AND TESTS
+------------------------
+  run_capsule.py
+    Main orchestration, logger timing, continuous-mode inference, QC dispatch.
+    --qc_folder_name is parsed and assigned to qc_folder_name.
+
+  slap2_synching.py
+    DI3 parsing/reconciliation and primary/secondary timestamp generation.
+    get_slap2_primary_plane_timestamps accepts first_trial_start and reports
+    removed_pre_trial_cycle_count in reconciliation QC.
+
+  slap2_dat_utils.py
+    .dat filename parsing and chunk validation.
+
+  zebra_movie_qc.py
+    Zebra repeat plots and repeat-to-repeat Pearson correlations.
+
+  test_run_capsule.py
+  test_slap2_synching.py
+  test_slap2_dat_utils.py
+
+Latest focused validation before full runs:
+
+  python -m py_compile run_capsule.py slap2_synching.py
+  python -m unittest test_slap2_synching test_slap2_dat_utils test_run_capsule
+
+Result: 43 tests passed; touched files had clean editor diagnostics.
+
+
+OUTPUT MANAGEMENT WARNING
+-------------------------
+run_capsule.py clears every entry in /root/capsule/results at startup. A unique
+--qc_folder_name does not by itself preserve earlier runs. Before another run,
+ensure existing outputs are staged, then restore/consolidate them afterward.
+
+Stable staging root:
+
+  /root/capsule/scratch/full_packaging_2026-09-24/
+
+It contains one subdirectory per completed session. Current consolidated outputs
+are in /root/capsule/results and include five NWB Zarr stores, five distinct QC
+folders, and session-specific *_data_process.json copies.
+
+Current NWBs:
+
+  828409_2025-11-11_14-41-04.nwb
+  828409_2025-11-20_10-01-34.nwb
+  828409_2025-11-21_11-14-03.nwb
+  880917_2026-09-17_13-13-52.nwb
+  880917_2026-09-17_14-43-15.nwb
+
+Current QC folders:
+
+  qc_828409_2025-11-11_14-41-13
+  qc_828409_2025-11-20_10-01-34
+  qc_828409_2025-11-21_11-14-03
+  qc_880917_2026-09-17_13-13-52
+  qc_880917_2026-09-17_14-43-15
+
+Note the November 11 NWB uses the processed identifier 14-41-04 while its raw
+session/QC identifier is 14-41-13.
+
+
+FULL-RUN RESULTS AND WARNINGS
+-----------------------------
+All five sessions completed NWB writing and their applicable QC stages without a
+traceback. QC includes synchronization, dF/F, raw fluorescence, running, Zebra,
+RF, stimulus tuning, and orientation tuning where corresponding tables exist.
+
+Maedeh 13-13-52:
+
+  100,350 total DI3 rising edges; 48,426 before DO0; 51,924 retained.
+  DMD1 raw expected 51,998 cycles, so the final 74 were unavailable and clamped.
+  This is a warning, not a packaging failure.
+
+Maedeh 14-43-15:
+
+  Partial first DMD1 line index is 199991 and is intentionally accepted.
+  DMD1 expected 146,933 cycles; 146,826 HARP cycles were available and clamped.
+
+P3 sessions:
+
+  Preserve trial-mode gap detection and mismatch warnings; these datasets were
+  recorded under historical clock behavior.
+  November 20 has partial/NaN timestamps near the end. Packaging completed, but
+  RF QC had fewer valid response windows. Do not silently hide this warning.
+
+November 21 full run (latest):
+
+  NWB: results/828409_2025-11-21_11-14-03.nwb (about 2.1 GB)
+  QC:  results/qc_828409_2025-11-21_11-14-03 (31 PNGs)
+  Primary:   828,925 samples timestamped
+  Secondary: 811,281 samples timestamped
+  RF: 1,185/1,193 retained stimuli had valid windows for each series
+  Eye tracking skipped due to absent ellipse file
+
+
+OPEN ZEBRA CORRELATION INVESTIGATION
+------------------------------------
+The user noticed that almost all per-ROI Zebra repeat correlations are near zero
+and considers this suspicious. No modification has yet been made for this issue.
+
+Current calculation in zebra_movie_qc.py:
+
+1. Find the Zebra movie interval.
+2. Treat one 600 s interval as two consecutive 300 s repeats, or use two equal
+   explicit intervals.
+3. Bin dF/F into 100 ms bins.
+4. For each ROI, compute Pearson r between matching bins in repeat 1 and repeat 2.
+5. "Global r" flattens all ROI/time values. It can be inflated by stable
+   between-ROI baseline/variance differences and is less informative than the
+   median per-ROI r for temporal reliability.
+
+Observed global r / median per-ROI r:
+
+  880917 13-13-52
+    DMD1 green  0.010 / -0.004
+    DMD1 red   -0.003 / -0.004
+    DMD2 green  0.022 /  0.001
+    DMD2 red    0.010 / -0.003
+
+  880917 14-43-15
+    DMD1 green  0.042 /  0.010
+    DMD1 red   -0.012 / -0.013
+    DMD2 green  0.062 /  0.020
+    DMD2 red    0.057 / -0.006
+
+  828409 11-11
+    DMD1 green  0.242 / -0.009
+    DMD1 red    0.094 /  0.026
+    DMD2 green  0.144 /  0.003
+    DMD2 red    0.150 /  0.046
+
+  828409 11-20
+    DMD1 green  0.119 / -0.008
+    DMD1 red    0.216 / -0.004
+    DMD2 green  0.049 /  0.030
+    DMD2 red    0.099 /  0.024
+
+  828409 11-21
+    DMD1 green  0.163 / -0.003
+    DMD1 red    0.071 /  0.027
+    DMD2 green  0.120 /  0.010
+    DMD2 red    0.136 /  0.036
+
+Interpretation so far: r near zero means the temporal dF/F pattern does not recur
+at the same 100 ms movie bins. It does not mean zero activity. Overlaid traces
+look dominated by irregular transients. Both green and red being low suggests
+non-repeat-locked activity, noise, motion/hemodynamics, baseline drift, or an
+alignment issue rather than clearly reproducible movie responses.
+
+Most useful next checks, in order:
+
+1. Verify that both 300 s windows contain the same movie frames and that the
+   interval split is correct. Do not assume a 600 s Zebra block is exactly two
+   identical frame sequences without checking logger/frame events.
+2. Quantify per-ROI correlations at coarser bins or after smoothing (0.5, 1, and
+   2 s). This tests whether 100 ms resolution is too strict for calcium dynamics.
+3. Compute lagged correlation over a small shared lag range. First estimate one
+   session/repeat offset from a population trace; do not optimize a separate lag
+   per ROI because that will inflate reliability.
+4. Compare raw dF/F, detrended/high-pass traces, and optionally neuropil/motion
+   regressions. Use the same transform for both repeats.
+5. Add uncertainty/null estimates, e.g. circularly shifted repeats or unrelated
+   windows. With only two repeats, r alone is a weak reliability estimate.
+6. Check known orientation/RF-responsive ROIs as positive controls. If those are
+   reliable but Zebra is not, a biological/stimulus-specific interpretation is
+   more plausible.
+
+Changes that may legitimately improve sensitivity: modest smoothing/coarser
+bins, one independently estimated shared lag correction, consistent detrending,
+and verified frame-level repeat boundaries. Avoid cherry-picking per-ROI lags,
+dropping low-r ROIs, or smoothing until r rises; those merely inflate the metric.
+
+
+SAFE CONTINUATION CHECKLIST
+---------------------------
+1. Read the local function/test being changed; do not remap the whole repo.
+2. Form one testable hypothesis and make the smallest edit.
+3. Run the narrowest relevant test immediately.
+4. Preserve legacy DO2 timing and trial-mode synchronization.
+5. Preserve prior results before invoking run_capsule.py.
+6. Report warnings separately from failures.

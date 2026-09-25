@@ -1,17 +1,54 @@
 import unittest
 from unittest.mock import patch
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
+import pandas as pd
 
 from run_capsule import (
     ensure_was_generated_by,
     filter_slap2_acquisition,
     filter_planes_with_sources,
     find_eye_tracking_paths,
+    infer_continuous_slap2_mode,
+    read_stim_csv,
     resolve_slap2_acquisition,
     trim_unterminated_harp_trial,
 )
+
+
+class ReadStimCsvTests(unittest.TestCase):
+    def test_normalizes_block_type(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "stimulus.csv"
+            pd.DataFrame(
+                {"Duration": [1.0], "Block_Type": ["movie"]}
+            ).to_csv(path, index=False)
+
+            result = read_stim_csv(path)
+
+        self.assertIn("BlockType", result.columns)
+        self.assertNotIn("Block_Type", result.columns)
+        self.assertEqual(result.loc[0, "BlockType"], "movie")
+
+    def test_normalizes_columns_used_by_zebra_and_tuning_qc(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "stimulus.csv"
+            pd.DataFrame(
+                {
+                    "Duration": [300.0],
+                    "Block_Number": [2],
+                    "Block_Label": ["Zebra"],
+                    "Trial_Type": ["movie"],
+                    "Block_Type": ["movie"],
+                }
+            ).to_csv(path, index=False)
+
+            result = read_stim_csv(path)
+
+        for column in ("BlockNumber", "BlockLabel", "TrialType", "BlockType"):
+            self.assertIn(column, result.columns)
 
 
 class FakeNWBFile:
@@ -176,7 +213,124 @@ class TrimUnterminatedHarpTrialTests(unittest.TestCase):
             trim_unterminated_harp_trial(harp_data)
 
 
+class InferContinuousSlap2ModeTests(unittest.TestCase):
+    @staticmethod
+    def experiment_summary(first_chunk_start=1, second_chunk_start=101):
+        return {
+            "Path1": {
+                "frame_info": {
+                    "trial_num_frames": np.asarray([[3, 3]]),
+                    "frame_line_idxs": np.asarray(
+                        [[
+                            first_chunk_start,
+                            first_chunk_start + 49,
+                            first_chunk_start + 99,
+                            second_chunk_start,
+                            second_chunk_start + 49,
+                            second_chunk_start + 99,
+                        ]]
+                    ),
+                }
+            },
+            "Path2": {
+                "frame_info": {
+                    "trial_num_frames": np.asarray([[3, 3]]),
+                    "frame_line_idxs": np.asarray(
+                        [[
+                            first_chunk_start,
+                            first_chunk_start + 49,
+                            first_chunk_start + 99,
+                            second_chunk_start,
+                            second_chunk_start + 49,
+                            second_chunk_start + 99,
+                        ]]
+                    ),
+                }
+            },
+        }
+
+    @staticmethod
+    def plane_inputs(trial_number=1):
+        return [
+            (
+                f"Path{dmd_number}",
+                f"DMD{dmd_number}",
+                str(dmd_number),
+                [],
+                [Path(
+                    "acquisition_20260917_130000_"
+                    f"DMD{dmd_number}-TRIAL{trial_number:06d}-CYCLE-000000.dat"
+                )],
+                2,
+            )
+            for dmd_number in (1, 2)
+        ]
+
+    @staticmethod
+    def harp_data(starts=(0.0,), ends=(10.0,)):
+        return {
+            "normalized_slap2_start": np.asarray(starts),
+            "normalized_slap2_end": np.asarray(ends),
+        }
+
+    def test_detects_one_raw_trial_with_continued_summary_chunks(self):
+        self.assertTrue(infer_continuous_slap2_mode(
+            self.experiment_summary(), self.plane_inputs(), self.harp_data()
+        ))
+
+    def test_detects_partial_first_chunk_with_continued_line_indices(self):
+        self.assertTrue(infer_continuous_slap2_mode(
+            self.experiment_summary(
+                first_chunk_start=200,
+                second_chunk_start=300,
+            ),
+            self.plane_inputs(),
+            self.harp_data(),
+        ))
+
+    def test_preserves_trial_based_mode_when_raw_trials_differ(self):
+        self.assertFalse(infer_continuous_slap2_mode(
+            self.experiment_summary(), self.plane_inputs(trial_number=2),
+            self.harp_data()
+        ))
+
+    def test_rejects_summary_chunks_whose_line_indices_reset(self):
+        self.assertFalse(infer_continuous_slap2_mode(
+            self.experiment_summary(second_chunk_start=1), self.plane_inputs(),
+            self.harp_data()
+        ))
+
+
 class TrimUnterminatedProcessedTrialTests(unittest.TestCase):
+    @patch("run_capsule.slap2_sync.read_dat_num_cycles", return_value=3000)
+    def test_resolution_accepts_cycle_chunked_dat_files(self, read_dat_num_cycles):
+        dat_paths = [
+            Path("acquisition_20260917_153810_DMD1-TRIAL000001-CYCLE-000000.dat"),
+            Path("acquisition_20260917_153810_DMD1-TRIAL000001-CYCLE-003000.dat"),
+            Path("acquisition_20260917_153810_DMD2-TRIAL000001-CYCLE-000000.dat"),
+        ]
+
+        result = resolve_slap2_acquisition(dat_paths, n_summary_trials=1)
+
+        self.assertEqual(result["retained_trial_count"], 1)
+        self.assertEqual(result["highest_dat_trial"], 1)
+
+    @patch("run_capsule.slap2_sync.read_dat_num_cycles")
+    def test_only_validates_selected_acquisition(self, read_dat_num_cycles):
+        dat_paths = [
+            Path("acquisition_20260917_120000_DMD1-TRIAL000001-CYCLE-000100.dat"),
+            Path("acquisition_20260917_130000_DMD1-TRIAL000001.dat"),
+            Path("acquisition_20260917_130000_DMD1-TRIAL000002.dat"),
+        ]
+
+        with self.assertWarnsRegex(RuntimeWarning, "Multiple SLAP2 acquisitions"):
+            result = resolve_slap2_acquisition(dat_paths, n_summary_trials=3)
+
+        self.assertEqual(
+            result["acquisition_prefix"], "acquisition_20260917_130000"
+        )
+        read_dat_num_cycles.assert_not_called()
+
     def test_resolution_excludes_final_dat_evidence(self):
         dat_paths = [
             Path("acquisition_20251111_144104_DMD1-TRIAL000001.dat"),
@@ -189,6 +343,28 @@ class TrimUnterminatedProcessedTrialTests(unittest.TestCase):
 
         self.assertEqual(result["retained_trial_count"], 1)
         self.assertEqual(result["highest_dat_trial"], 1)
+
+    def test_does_not_validate_excluded_trailing_trial_chunks(self):
+        dat_paths = [
+            Path("acquisition_20260917_130000_DMD1-TRIAL000001-CYCLE-000000.dat"),
+            Path("acquisition_20260917_130000_DMD1-TRIAL000002-CYCLE-003000.dat"),
+        ]
+
+        result = resolve_slap2_acquisition(
+            dat_paths, n_summary_trials=2, excluded_trailing_trials=1
+        )
+
+        self.assertEqual(result["retained_trial_count"], 1)
+        self.assertEqual(result["highest_dat_trial"], 1)
+
+    def test_rejects_malformed_chunks_when_trailing_trial_is_retained(self):
+        dat_paths = [
+            Path("acquisition_20260917_130000_DMD1-TRIAL000001-CYCLE-000000.dat"),
+            Path("acquisition_20260917_130000_DMD1-TRIAL000002-CYCLE-003000.dat"),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "trial 2 start at 3000"):
+            resolve_slap2_acquisition(dat_paths, n_summary_trials=2)
 
     def test_filters_final_trial_from_all_processed_arrays(self):
         dat_paths = [

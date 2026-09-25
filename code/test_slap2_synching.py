@@ -2,6 +2,8 @@ import unittest
 import warnings
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,10 +11,26 @@ import numpy as np
 from slap2_synching import (
     _build_trial_line_time_map,
     _plot_trial_line_normalization,
+    get_slap2_primary_plane_timestamps,
+    get_trial_num_cycles,
     get_slap2_secondary_plane_timestamps,
     normalize_continued_trial_line_indices,
     reconcile_cycle_clock_trials,
 )
+
+
+class GetTrialNumCyclesTests(unittest.TestCase):
+    @patch("slap2_synching.read_dat_num_cycles", side_effect=[3000, 3000, 1200])
+    def test_sums_cycle_chunks_for_each_trial(self, read_dat_num_cycles):
+        dat_paths = [
+            Path("acquisition_DMD1-TRIAL000001-CYCLE-000000.dat"),
+            Path("acquisition_DMD1-TRIAL000001-CYCLE-003000.dat"),
+            Path("acquisition_DMD1-TRIAL000002-CYCLE-000000.dat"),
+        ]
+
+        result = get_trial_num_cycles(dat_paths, n_trials=2)
+
+        np.testing.assert_array_equal(result, [6000, 1200])
 
 
 def _build_cycle_clock(group_sizes, period=0.02, gap=1.0):
@@ -24,6 +42,63 @@ def _build_cycle_clock(group_sizes, period=0.02, gap=1.0):
         next_start = group[-1] + gap
     cycle_starts = np.asarray(cycle_starts)
     return cycle_starts, np.diff(cycle_starts)
+
+
+def _sample_cycle_clock(cycle_starts):
+    times = np.asarray([
+        value
+        for cycle_start in cycle_starts
+        for value in (cycle_start - 0.001, cycle_start)
+    ])
+    signal = np.tile([False, True], len(cycle_starts))
+    return signal, times
+
+
+class FirstTrialCycleFilterTests(unittest.TestCase):
+    def test_continuous_mode_excludes_cycles_before_first_trial(self):
+        signal, times = _sample_cycle_clock([-10.0, -9.9, 0.1, 0.2, 0.3])
+
+        timestamps, _, qc = get_slap2_primary_plane_timestamps(
+            np.array([1, 2, 3]),
+            np.array([3]),
+            1,
+            signal,
+            times,
+            trial_num_cycles=np.array([3]),
+            highest_dat_trial=1,
+            first_trial_start=0.0,
+        )
+
+        np.testing.assert_allclose(timestamps, [0.1, 0.2, 0.3])
+        self.assertEqual(qc['segmentation_method_qc'], 'line_count_continuous')
+        self.assertEqual(
+            qc['cycle_clock_reconciliation_qc'][
+                'removed_pre_trial_cycle_count'
+            ],
+            2,
+        )
+
+    def test_trial_mode_keeps_gap_detection_after_filtering(self):
+        signal, times = _sample_cycle_clock(
+            [-10.0, -9.9, 0.1, 0.2, 1.1, 1.2]
+        )
+
+        timestamps, _, qc = get_slap2_primary_plane_timestamps(
+            np.array([1, 2, 1, 2]),
+            np.array([2, 2]),
+            1,
+            signal,
+            times,
+            trial_num_cycles=np.array([2, 2]),
+            highest_dat_trial=2,
+            first_trial_start=0.0,
+        )
+
+        np.testing.assert_allclose(timestamps, [0.1, 0.2, 1.1, 1.2])
+        self.assertEqual(qc['segmentation_method_qc'], 'gap_detection')
+        reconciliation = qc['cycle_clock_reconciliation_qc']
+        self.assertEqual(reconciliation['removed_pre_trial_cycle_count'], 2)
+        self.assertEqual(reconciliation['removed_leading_cycle_count'], 0)
 
 
 class ReconcileCycleClockTrialsTests(unittest.TestCase):

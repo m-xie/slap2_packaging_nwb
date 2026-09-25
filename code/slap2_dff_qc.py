@@ -23,21 +23,31 @@ def _is_raw_fluorescence_series(name):
 
 def _bin_activity(data, timestamps, bin_size=0.1, chunk_size=50000):
     """Compute per-ROI means in fixed-width bins while preserving empty gaps."""
-    timestamps = np.asarray(timestamps)
-    if len(timestamps) == 0:
+    timestamps = np.asarray(timestamps, dtype=float)
+    finite_timestamps = np.isfinite(timestamps)
+    if not finite_timestamps.any():
         return np.empty((0, data.shape[1])), np.empty(0)
 
-    start_time = float(timestamps[0])
-    bin_indices = np.floor((timestamps - start_time) / bin_size).astype(np.int64)
-    n_bins = int(bin_indices[-1]) + 1
+    # Some secondary-plane trials cannot be mapped when the primary plane has no
+    # HARP cycles. Their timestamps are intentionally NaN and must not create an
+    # invalid integer bin; all finite samples remain in session-time coordinates.
+    start_time = float(timestamps[finite_timestamps][0])
+    bin_indices = np.full(len(timestamps), -1, dtype=np.int64)
+    bin_indices[finite_timestamps] = np.floor(
+        (timestamps[finite_timestamps] - start_time) / bin_size
+    ).astype(np.int64)
+    n_bins = int(bin_indices[finite_timestamps].max()) + 1
     n_rois = data.shape[1]
     sums = np.zeros((n_bins, n_rois), dtype=np.float64)
     counts = np.zeros((n_bins, n_rois), dtype=np.int64)
 
     for chunk_start in range(0, len(timestamps), chunk_size):
         chunk_stop = min(chunk_start + chunk_size, len(timestamps))
-        chunk = np.asarray(data[chunk_start:chunk_stop])
-        chunk_bins = bin_indices[chunk_start:chunk_stop]
+        chunk_valid = finite_timestamps[chunk_start:chunk_stop]
+        if not chunk_valid.any():
+            continue
+        chunk = np.asarray(data[chunk_start:chunk_stop])[chunk_valid]
+        chunk_bins = bin_indices[chunk_start:chunk_stop][chunk_valid]
         boundaries = np.r_[0, np.flatnonzero(np.diff(chunk_bins)) + 1]
         unique_bins = chunk_bins[boundaries]
         finite = np.isfinite(chunk)

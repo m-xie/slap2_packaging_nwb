@@ -46,6 +46,15 @@
 			"type": "text",
 			"value_type": "string",
 			"default_value": "True"
+		},
+		{
+			"id": "lWFv3SCc1XMD3EPt",
+			"name": "Stimulus Table Pattern",
+			"param_name": "stim_table_pattern",
+			"help_text": "Substring used to identify the stim table csv",
+			"type": "text",
+			"value_type": "string",
+			"default_value": "orientations_orientations0"
 		}
 	]
 }
