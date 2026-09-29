@@ -11,6 +11,7 @@ from run_capsule import (
     filter_slap2_acquisition,
     filter_planes_with_sources,
     find_eye_tracking_paths,
+    find_slap2_trial_index,
     infer_continuous_slap2_mode,
     read_stim_csv,
     resolve_slap2_acquisition,
@@ -206,11 +207,36 @@ class TrimUnterminatedHarpTrialTests(unittest.TestCase):
         self.assertEqual(result["slap2_cycle_clock_times"][-1], 59.0)
         self.assertTrue(excluded)
 
+    def test_preserves_single_start_without_end_for_continuous_inference(self):
+        harp_data = self.harp_data([0.0], [])
+
+        result, excluded = trim_unterminated_harp_trial(harp_data)
+
+        np.testing.assert_array_equal(result["normalized_slap2_start"], [0.0])
+        self.assertEqual(len(result["normalized_slap2_end"]), 0)
+        np.testing.assert_array_equal(
+            result["slap2_cycle_clock_times"],
+            harp_data["slap2_cycle_clock_times"],
+        )
+        self.assertFalse(excluded)
+
     def test_rejects_other_pulse_count_mismatches(self):
         harp_data = self.harp_data([0.0, 30.0, 60.0], [29.0])
 
         with self.assertRaisesRegex(ValueError, "Unsupported SLAP2 trial pulse mismatch"):
             trim_unterminated_harp_trial(harp_data)
+
+
+class FindSlap2TrialIndexTests(unittest.TestCase):
+    def test_assigns_time_to_single_open_continuous_trial(self):
+        self.assertEqual(
+            find_slap2_trial_index(120.0, np.asarray([0.0]), np.asarray([])),
+            0,
+        )
+
+    def test_rejects_time_before_single_open_continuous_trial(self):
+        with self.assertRaisesRegex(Exception, "out of trial bounds"):
+            find_slap2_trial_index(-1.0, np.asarray([0.0]), np.asarray([]))
 
 
 class InferContinuousSlap2ModeTests(unittest.TestCase):
@@ -276,6 +302,12 @@ class InferContinuousSlap2ModeTests(unittest.TestCase):
     def test_detects_one_raw_trial_with_continued_summary_chunks(self):
         self.assertTrue(infer_continuous_slap2_mode(
             self.experiment_summary(), self.plane_inputs(), self.harp_data()
+        ))
+
+    def test_detects_continuous_session_without_end_pulse(self):
+        self.assertTrue(infer_continuous_slap2_mode(
+            self.experiment_summary(), self.plane_inputs(),
+            self.harp_data(ends=())
         ))
 
     def test_detects_partial_first_chunk_with_continued_line_indices(self):

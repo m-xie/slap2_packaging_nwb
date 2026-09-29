@@ -393,10 +393,16 @@ def get_expected_n_frames(experiment_summary):
 
 
 def infer_continuous_slap2_mode(experiment_summary, plane_inputs, harp_data):
-    """Identify one raw SLAP2 trial split into source-extraction chunks."""
+    """Identify one raw SLAP2 trial split into source-extraction chunks.
+
+    DO1 is optional here because continuous fluorescence timing comes from DI3
+    cycle starts and SLAP2 line indices. The remaining structural checks are
+    intentionally strict so a missing end pulse cannot turn trial-based data
+    into a continuous acquisition by itself.
+    """
     if (
         len(harp_data['normalized_slap2_start']) != 1
-        or len(harp_data['normalized_slap2_end']) != 1
+        or len(harp_data['normalized_slap2_end']) not in (0, 1)
     ):
         return False
 
@@ -466,11 +472,20 @@ def infer_continuous_slap2_mode(experiment_summary, plane_inputs, harp_data):
 
 
 def trim_unterminated_harp_trial(harp_data):
-    """Exclude one trailing SLAP2 trial that has a start pulse but no end pulse."""
+    """Exclude an unterminated trailing trial unless it may be continuous.
+
+    A sole DO0 without DO1 is preserved provisionally. Continuous-mode
+    inference later validates it using chunked .dat files and continued line
+    indices. An unmatched final DO0 in a multi-trial session is still removed.
+    """
     starts = harp_data['normalized_slap2_start']
     ends = harp_data['normalized_slap2_end']
     excluded_trailing_trials = 0
 
+    # Do not erase the only acquisition before continuous-mode inference has
+    # inspected its .dat chunks and source-extraction line indices.
+    if len(starts) == 1 and len(ends) == 0:
+        return dict(harp_data), False
     if len(starts) == len(ends) + 1 and starts[-1] > ends[-1]:
         excluded_trailing_trials = 1
     elif len(starts) != len(ends):
@@ -506,6 +521,10 @@ def find_slap2_trial_index(time, start_trials, end_trials):
     # Check bounds and if time fits in the trial interval
     if idx < 0 or idx >= len(start_trials):
         raise Exception(f"Time {time} is out of trial bounds")
+    # A validated continuous acquisition without DO1 is an open interval. Its
+    # fluorescence end remains cycle-derived; this only labels stimulus rows.
+    if len(start_trials) == 1 and len(end_trials) == 0:
+        return idx
     if time > end_trials[idx]:
         # raise Exception(f"Time {time} not within trial end {end_trials[idx]}")
         return -1
@@ -1384,6 +1403,17 @@ def add_ophys_to_nwb(
     continuous_mode = infer_continuous_slap2_mode(
         experiment_summary, source_plane_inputs, harp_data
     )
+    # Missing DO1 is supported only after the independent continuous-acquisition
+    # evidence above succeeds. Trial-based data still require closing pulses.
+    if (
+        len(harp_data['normalized_slap2_start']) == 1
+        and len(harp_data['normalized_slap2_end']) == 0
+        and not continuous_mode
+    ):
+        raise ValueError(
+            "SLAP2 end pulse is missing, but the session was not recognized as "
+            "a continuous acquisition."
+        )
     effective_trial_count = 1 if continuous_mode else summary_trial_counts.pop()
     if continuous_mode:
         print(

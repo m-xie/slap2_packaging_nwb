@@ -454,7 +454,9 @@ def assign_cycles_by_gap_detection(
 
     After segmenting, each trial's detected cycle count is compared against the
     estimate from get_expected_cycle_count() as a sanity check. Any mismatch
-    triggers a warning but does not abort.
+    triggers a warning but does not abort. All cycles inside the gap-defined
+    trial remain authoritative, including trailing HARP cycles that may have
+    been omitted by SLAP2 processing.
 
     Parameters
     ----------
@@ -530,6 +532,10 @@ def assign_cycles_by_line_count(
     """
     Fallback method: assign cycles to trials by consuming the expected number of
     cycles per trial, as estimated from scan line indices via get_expected_cycle_count().
+
+    Only the expected number is consumed. Extra HARP pulses after the final
+    expected cycle are deliberately left unused, which tolerates processing
+    dropping one or more trailing cycles in continuous sessions.
 
     Used when inter-trial gap detection fails, or for continuous (single-trial)
     sessions where there are no inter-trial pauses to detect.

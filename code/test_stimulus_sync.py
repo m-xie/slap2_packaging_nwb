@@ -8,6 +8,7 @@ import pandas as pd
 
 from stimulus_sync import (
     align_logger_frames_to_harp,
+    extract_harp_photodiode_transitions,
     extract_logger_events,
     resolve_stimulus_start_times,
     select_stimulus_logger,
@@ -15,6 +16,21 @@ from stimulus_sync import (
 
 
 class StimulusSyncTests(unittest.TestCase):
+    def test_uses_analog_recording_bound_when_end_pulse_is_missing(self):
+        transition_times, transition_states, _ = (
+            extract_harp_photodiode_transitions({
+                "analog_times": np.arange(7.0),
+                "photodiode": np.asarray([0, 0, 1, 0, 1, 0, 0]),
+                "normalized_slap2_start": np.asarray([0.0]),
+                "normalized_slap2_end": np.asarray([]),
+            })
+        )
+
+        np.testing.assert_array_equal(transition_times, [2.0, 3.0, 4.0, 5.0])
+        np.testing.assert_array_equal(
+            transition_states, [True, False, True, False]
+        )
+
     def test_selects_dup_logger_then_first_sorted(self):
         self.assertEqual(
             select_stimulus_logger([Path("z.csv"), Path("a_dup.csv")]),

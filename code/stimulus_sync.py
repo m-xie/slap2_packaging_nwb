@@ -102,21 +102,31 @@ def extract_logger_events(logger_path):
 
 
 def extract_harp_photodiode_transitions(harp_data):
-    """Binarize the physical photodiode and return its HARP-timed edges."""
+    """Binarize the physical photodiode and return its HARP-timed edges.
+
+    DO1 normally bounds the useful analog interval. If DO1 is absent, the HARP
+    analog recording end is used instead: DI3 can stop before a stimulus block
+    ends, so its final cycle is not a safe photodiode cutoff.
+    """
     analog_times = np.asarray(harp_data["analog_times"], dtype=float)
     photodiode = np.asarray(harp_data["photodiode"], dtype=float)
     starts = np.asarray(harp_data["normalized_slap2_start"], dtype=float)
     ends = np.asarray(harp_data["normalized_slap2_end"], dtype=float)
-    if len(starts) == 0 or len(ends) == 0:
-        raise ValueError("HARP DO0 and DO1 pulses are required for photodiode sync")
+    if len(starts) == 0:
+        raise ValueError("HARP DO0 pulse is required for photodiode sync")
 
     acquisition_start = float(starts[0])
-    acquisition_end = float(ends[-1])
+    if len(ends):
+        acquisition_end = float(ends[-1])
+    else:
+        # Logger matching and residual gates below reject an unusable analog
+        # tail; keeping it is preferable to dropping valid post-imaging stimuli.
+        acquisition_end = float(analog_times[-1])
     if acquisition_end <= acquisition_start:
         raise ValueError("HARP acquisition end must follow acquisition start")
     # Long pre-acquisition recordings contain baseline ADC noise but no useful
-    # bright state. Restricting level estimation to DO0..DO1 prevents that noise
-    # from collapsing the dark/bright threshold toward the baseline.
+    # bright state. Restricting level estimation to the acquisition interval
+    # prevents that noise from collapsing the threshold toward the baseline.
     in_acquisition = (
         (analog_times >= acquisition_start) & (analog_times <= acquisition_end)
     )
