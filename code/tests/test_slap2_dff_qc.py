@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from slap2_dff_qc import (
+from qc.slap2_dff_qc import (
     _bin_activity,
     _is_raw_fluorescence_series,
     _save_dff_plot,

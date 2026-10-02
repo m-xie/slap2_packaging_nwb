@@ -1,18 +1,33 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
-from zebra_movie_qc import (
+from qc.zebra_movie_qc import (
     _finite_correlation,
     _repeat_windows,
     _save_roi_correlation_plot,
+    plot_zebra_repeats,
 )
 
 
 class ZebraMovieQcTests(unittest.TestCase):
+    @patch("qc.zebra_movie_qc.pynwb.NWBHDF5IO")
+    def test_does_not_create_folder_without_movie_table(self, io_class):
+        io_class.return_value.__enter__.return_value.read.return_value = (
+            SimpleNamespace(intervals={})
+        )
+        with TemporaryDirectory() as directory:
+            output_folder = Path(directory) / "zebra_movie"
+
+            plot_zebra_repeats(Path(directory) / "input.nwb", output_folder)
+
+            self.assertFalse(output_folder.exists())
+
     def test_finite_correlation_measures_repeat_shape(self):
         first = np.asarray([1.0, 2.0, np.nan, 4.0])
         second = np.asarray([3.0, 5.0, 99.0, 9.0])

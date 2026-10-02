@@ -1,12 +1,32 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
-from stim_tuning_qc import _calculate_orientation_tuning, _orientation_heatmap
+from qc.stim_tuning_qc import (
+    _calculate_orientation_tuning,
+    _orientation_heatmap,
+    compute_orientation_tuning_qc,
+)
 
 
 class OrientationTuningTests(unittest.TestCase):
+    @patch("qc.stim_tuning_qc.pynwb.NWBHDF5IO")
+    def test_does_not_create_folder_without_orientation_table(self, io_class):
+        io_class.return_value.__enter__.return_value.read.return_value = (
+            SimpleNamespace(intervals={}, processing={})
+        )
+        with TemporaryDirectory() as directory:
+            qc_folder = Path(directory)
+
+            compute_orientation_tuning_qc(qc_folder, qc_folder / "input.nwb")
+
+            self.assertFalse((qc_folder / "orientation_tuning").exists())
+
     def test_heatmap_rows_are_rois_and_columns_are_directions(self):
         normalized = np.arange(2 * 14 * 60).reshape(2, 14, 60)
         roi_order = np.arange(60)[::-1]

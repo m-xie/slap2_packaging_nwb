@@ -164,8 +164,6 @@ def compute_receptive_field_qc(qc_folder, nwb_path, onset_delay=0.2):
     onset_delay : float
     """
     rf_folder = Path(qc_folder) / 'receptive_fields'
-    rf_folder.mkdir(exist_ok=True)
-
     nwb_path = Path(nwb_path)
     if nwb_path.is_dir():
         io_class = hdmf_zarr.NWBZarrIO
@@ -193,6 +191,7 @@ def _compute_receptive_field_qc(rf_folder, nwbfile, onset_delay):
     if 'ophys' not in nwbfile.processing:
         print("RF QC: no ophys processing module found; skipping.")
         return
+    rf_folder.mkdir(parents=True, exist_ok=True)
     ophys = nwbfile.processing['ophys']
 
     for table_name in rf_table_names:

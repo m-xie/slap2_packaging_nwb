@@ -14,10 +14,10 @@ from slap2_dat_utils import parse_dat_file, validate_dat_files
 import slap2_synching as slap2_sync
 import slap2_running_packaging as running_packaging
 import slap2_eye_tracking_packaging as eye_tracking_packaging
-import slap2_receptive_fields_qc as slap2_rf_qc
-import slap2_dff_qc
-import stim_tuning_qc
-import zebra_movie_qc
+from qc import slap2_dff_qc
+from qc import slap2_receptive_fields_qc as slap2_rf_qc
+from qc import stim_tuning_qc
+from qc import zebra_movie_qc
 import json
 import pandas as pd
 import argparse
@@ -450,23 +450,23 @@ def infer_continuous_slap2_mode(experiment_summary, plane_inputs, harp_data):
             chunk = frame_line_idxs[
                 boundaries[chunk_idx]:boundaries[chunk_idx + 1]
             ].astype(np.int64, copy=False)
-            nonempty_chunks.append(chunk)
+            nonempty_chunks.append((chunk_idx, chunk))
             chunk_steps = np.diff(chunk)
             positive_steps.extend(chunk_steps[chunk_steps > 0])
 
         if len(nonempty_chunks) <= 1 or not positive_steps:
             return False
         max_continuation_gap = 1.5 * float(np.percentile(positive_steps, 99))
-        if int(nonempty_chunks[0][0]) < 1:
+        if int(nonempty_chunks[0][1][0]) < 1:
             return False
-        boundary_gaps = [
-            int(current[0]) - int(previous[-1])
-            for previous, current in zip(nonempty_chunks, nonempty_chunks[1:])
-        ]
-        if any(
-            gap <= 0 or gap > max_continuation_gap for gap in boundary_gaps
+        for (previous_idx, previous), (current_idx, current) in zip(
+            nonempty_chunks, nonempty_chunks[1:]
         ):
-            return False
+            boundary_gap = int(current[0]) - int(previous[-1])
+            if boundary_gap <= 0:
+                return False
+            if current_idx == previous_idx + 1 and boundary_gap > max_continuation_gap:
+                return False
 
     return True
 

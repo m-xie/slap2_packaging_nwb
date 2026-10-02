@@ -320,6 +320,30 @@ class InferContinuousSlap2ModeTests(unittest.TestCase):
             self.harp_data(),
         ))
 
+    def test_detects_continuous_session_with_removed_summary_chunk(self):
+        summary = self.experiment_summary()
+        for plane in summary.values():
+            plane["frame_info"]["trial_num_frames"] = np.asarray([[3, 0, 3]])
+            plane["frame_info"]["frame_line_idxs"] = np.asarray(
+                [[1, 50, 100, 5000, 5050, 5100]]
+            )
+
+        self.assertTrue(infer_continuous_slap2_mode(
+            summary, self.plane_inputs(), self.harp_data()
+        ))
+
+    def test_rejects_line_index_reset_after_removed_summary_chunk(self):
+        summary = self.experiment_summary()
+        for plane in summary.values():
+            plane["frame_info"]["trial_num_frames"] = np.asarray([[3, 0, 3]])
+            plane["frame_info"]["frame_line_idxs"] = np.asarray(
+                [[1, 50, 100, 1, 50, 100]]
+            )
+
+        self.assertFalse(infer_continuous_slap2_mode(
+            summary, self.plane_inputs(), self.harp_data()
+        ))
+
     def test_preserves_trial_based_mode_when_raw_trials_differ(self):
         self.assertFalse(infer_continuous_slap2_mode(
             self.experiment_summary(), self.plane_inputs(trial_number=2),

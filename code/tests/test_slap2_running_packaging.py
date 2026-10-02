@@ -87,8 +87,9 @@ class RunningNWBTests(unittest.TestCase):
         )
 
         self.assertIn("running", self.nwbfile.processing)
-        self.assertIn("running_speed", self.nwbfile.processing["running"])
-        self.assertIn("running_wheel_rotation", self.nwbfile.processing["running"])
+        running_interfaces = self.nwbfile.processing["running"].data_interfaces
+        self.assertIn("running_speed", running_interfaces)
+        self.assertIn("running_wheel_rotation", running_interfaces)
         self.assertIn("raw_running_wheel_counts", self.nwbfile.acquisition)
 
 

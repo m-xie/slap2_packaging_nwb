@@ -214,7 +214,6 @@ def plot_zebra_repeats(nwb_path, output_folder, bin_size=0.1):
     """Plot two equal Zebra repeats and their per-ROI response reliability."""
     nwb_path = Path(nwb_path)
     output_folder = Path(output_folder)
-    output_folder.mkdir(parents=True, exist_ok=True)
     io_class = hdmf_zarr.NWBZarrIO if nwb_path.is_dir() else pynwb.NWBHDF5IO
 
     with io_class(str(nwb_path), mode="r") as io:
@@ -231,6 +230,7 @@ def plot_zebra_repeats(nwb_path, output_folder, bin_size=0.1):
             print("Zebra QC: no Zebra movie intervals found; skipping.")
             return
         repeat_starts, repeat_duration = _repeat_windows(zebra_rows)
+        output_folder.mkdir(parents=True, exist_ok=True)
 
         for interface in nwbfile.processing["ophys"].data_interfaces.values():
             if not isinstance(interface, pynwb.ophys.Fluorescence):

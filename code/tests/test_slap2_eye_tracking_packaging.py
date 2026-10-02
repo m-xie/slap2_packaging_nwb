@@ -135,7 +135,7 @@ class EyeTrackingPackagingTests(unittest.TestCase):
 
         module = nwbfile.processing["eye_tracking"]
         for name in ("ellipse", "pupil", "corneal_reflection", "likely_blink_times"):
-            self.assertIn(name, module)
+            self.assertIn(name, module.data_interfaces)
 
 
 if __name__ == "__main__":

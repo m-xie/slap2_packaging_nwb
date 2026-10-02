@@ -665,7 +665,6 @@ def compute_stim_tuning_qc(
 def compute_orientation_tuning_qc(qc_folder, nwb_path):
     """Compute two-block orientation tuning plots for all packaged dF/F series."""
     output_folder = Path(qc_folder) / 'orientation_tuning'
-    output_folder.mkdir(exist_ok=True)
 
     nwb_path = Path(nwb_path)
     io_class = hdmf_zarr.NWBZarrIO if nwb_path.is_dir() else pynwb.NWBHDF5IO
@@ -687,6 +686,7 @@ def compute_orientation_tuning_qc(qc_folder, nwb_path):
             )
             return
 
+        output_folder.mkdir(parents=True, exist_ok=True)
         ophys = nwbfile.processing['ophys']
         for interface in ophys.data_interfaces.values():
             if not isinstance(interface, pynwb.ophys.Fluorescence):

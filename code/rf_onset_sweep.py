@@ -13,7 +13,7 @@ import numpy as np
 from pathlib import Path
 import pynwb
 import hdmf_zarr
-import slap2_receptive_fields_qc as rf
+from qc import slap2_receptive_fields_qc as rf
 
 
 def main():
