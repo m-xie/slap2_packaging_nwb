@@ -280,7 +280,7 @@ def main():
         io_class = hdmf_zarr.NWBZarrIO
         nwb_file_obj = nwb_utils.create_base_nwb_file(session_path)
         ensure_was_generated_by(nwb_file_obj)
-        result_nwb_path = results_folder / f"{nwb_file_obj.session_id}.nwb"
+        result_nwb_path = results_folder / f"slap2.nwb.zarr"
         with io_class(str(result_nwb_path), "w") as nwb_io:
             nwb_io.write(nwb_file_obj)
 
