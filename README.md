@@ -44,6 +44,59 @@ row identifiers are preserved even when only a prefix can be synchronized.
 
 ### Timing and validation
 
+#### Per-movie frame timing
+
+Each movie row in `stimulus_blocks` now contains four equal-length NWB ragged
+arrays (non-movie rows contain typed empty arrays):
+
+| Column | Meaning |
+| --- | --- |
+| `movie_frame_timestamps` | Float64 onset estimates in seconds relative to the first SLAP2 DO0 pulse, matching the existing normalized HARP clock. Unsupported events have `NaN` timestamps. |
+| `movie_frame_numbers` | Original 1-based `MovieFrame-N` logger counters, reset for each presentation. |
+| `movie_display_frames` | Global logger `Frame` coordinates for those events. |
+| `movie_frame_timing_status` | UInt8 codes: **0** anchored, **1** interpolated, **2** endpoint-extrapolated, **3** unsupported. |
+
+`movie_url` links known movie textures to the supplied commit-pinned GitHub
+assets; it is empty for non-movie rows or unknown textures. Movie counters are
+preserved as logged, not claimed to be independently verified decoded MP4
+indices. Each event describes one logged content-frame presentation, not every
+monitor refresh. No frames are synthesized from nominal FPS or trial duration.
+
+Frame timestamps use the **same matched photodiode anchors and piecewise-linear
+map as interval boundaries**, computed once per session. Exact matched anchors
+receive status 0. Interpolation is unsupported when the surrounding anchor gap
+exceeds **three times the median logger photodiode-transition spacing**. This
+threshold is based on all logged transitions, not the potentially sparse matched
+subset; it is a coverage heuristic, not an accuracy guarantee. The Python
+`synchronize_presentations()` API permits an explicit positive
+`maximum_interpolation_gap_frames` override. Endpoint extrapolation remains
+limited to two display frames and receives status 2.
+
+For interrupted recordings, existing interval recovery still omits whole blocks
+starting beyond usable coverage. **All events within retained blocks are kept**,
+including events beyond a clipped stop: those events receive status 3 and `NaN`,
+never a timestamp clamped to the last edge. `movie_frame_count` counts preserved
+logged events, not just finite timestamps. Timing provenance reports logged,
+stored, omitted, and per-status counts. Filter by finite timestamps and the
+desired quality codes before fine-alignment analysis; the arrays remain paired
+by index when filtering.
+
+Alignment anchors are used in memory for synchronization and the timing QC
+plot, but are **not saved in NWB**. The per-frame arrays remain in
+`stimulus_blocks`. Policy, clock reference, and QC summaries are included in
+external processing provenance under `stimulus_timing.movie_frame_timing`;
+the original HARP clock offset is recorded when available.
+
+**Precision caveat:** timestamps are photodiode-aligned onset estimates, not
+independent optical measurements of every movie frame. Logger/render ordering,
+display scanout, ADC sampling, and edge-matching ambiguity can limit accuracy.
+The existing session-level p95 affine residual gate is 40 ms; passing it does
+not establish sub-frame precision. Zero residual at an interpolation anchor is
+not a timing-accuracy measurement. Validate logger event semantics and optical
+timing before interpreting these counters as exact MP4-frame onsets.
+
+#### Interval timing and recovery
+
 - `MovieFrame-1` identifies the first displayed content frame. Counters must
 	progress continuously and restart at 1 for every movie, including adjacent
 	movies. The **global display Frame**, not the content counter or logger
@@ -108,6 +161,12 @@ Stimulus-specific QC (Zebra repeats, receptive fields, stimulus tuning, and
 orientation tuning) is skipped for this format for now. General fluorescence,
 running, eye, and synchronization processing/QC remain unchanged. Existing
 formats continue to run the original stimulus-specific QC.
+
+Random Natural Movies packaging additionally writes a movie-frame timing PNG
+inside the QC synchronization directory. It shows within-block inter-frame
+intervals without bridging missing timestamps, anchor affine residuals
+(explicitly **not** accuracy estimates), and global-frame coverage with anchor
+spacing and unsupported/extrapolated events.
 
 ## Tests
 

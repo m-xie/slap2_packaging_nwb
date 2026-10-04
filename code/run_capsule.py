@@ -19,6 +19,7 @@ from qc import slap2_dff_qc
 from qc import slap2_receptive_fields_qc as slap2_rf_qc
 from qc import stim_tuning_qc
 from qc import zebra_movie_qc
+from qc.movie_frame_timing_qc import plot_movie_frame_timing
 import json
 import pandas as pd
 import argparse
@@ -322,6 +323,7 @@ def main():
             stimulus_timing_metadata = add_stim_table(
                 nwbfile, stim_table_csv, log_csv, harp_data, logger_format,
                 acquisition_json=acquisition_json,
+                movie_frame_qc_path=qc_folder / 'syncing' / 'movie_frame_timing.png',
             )
             stimulus_end_time = datetime.now().astimezone()
             ophys_start_time = datetime.now().astimezone()
@@ -635,10 +637,11 @@ def read_stim_csv(filepath):
     return df
 
 
-def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_format=None, acquisition_json=None):
+def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_format=None, acquisition_json=None, movie_frame_qc_path=None):
     if logger_format == random_natural_movies.LOGGER_FORMAT:
         return add_stim_table_movies(
             nwbfile, orientations_table, log_csv, harp_data, acquisition_json,
+            movie_frame_qc_path=movie_frame_qc_path,
         )
     stimulus_df = read_stim_csv(orientations_table)
 
@@ -706,7 +709,7 @@ def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_forma
 
     return timing_metadata
 
-def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisition_json=None):
+def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisition_json=None, movie_frame_qc_path=None):
     """Preserve observed source table rows and their individual grating trials."""
     blocks, gratings, timing_metadata = random_natural_movies.synchronize_presentations(
         pd.read_csv(stim_table_csv), log_csv, harp_data,
@@ -740,6 +743,14 @@ def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisiti
             for time in frame_table["start_time"]
         ]
         table = pynwb.file.TimeIntervals(name=name, description=description)
+        if name == "stimulus_blocks":
+            # Declare typed ragged targets before adding rows. HDMF rejects a
+            # non-empty explicit index with empty flat data (grating-only runs).
+            for column, (dtype, column_description) in random_natural_movies.MOVIE_FRAME_COLUMNS.items():
+                table.add_column(
+                    name=column, description=column_description + " Empty for non-movie rows.",
+                    data=np.array([], dtype=dtype), index=True,
+                )
         table.id.data.extend(
             frame_table["stimulus_table_row"].tolist()
             if name == "stimulus_blocks" else range(len(frame_table))
@@ -747,6 +758,10 @@ def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisiti
         table["start_time"].data.extend(frame_table.pop("start_time").tolist())
         table["stop_time"].data.extend(frame_table.pop("stop_time").tolist())
         for column in frame_table:
+            if name == "stimulus_blocks" and column in random_natural_movies.MOVIE_FRAME_COLUMNS:
+                for values in frame_table[column]:
+                    table[column].add_vector(values)
+                continue
             column_description = f"{column}: Random Natural Movies source metadata or playback-derived value"
             if name == "stimulus_blocks" and column == "movie_url":
                 column_description = (
@@ -762,6 +777,8 @@ def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisiti
             )
         nwbfile.add_time_intervals(table)
         print(f"Added intervals table '{name}' with {len(frame_table)} rows")
+    if movie_frame_qc_path is not None:
+        plot_movie_frame_timing(blocks, movie_frame_qc_path)
     print("stimulus timing:", timing_metadata)
     return timing_metadata
 

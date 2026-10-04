@@ -19,6 +19,25 @@ import stimulus_sync
 LOGGER_FORMAT = "Random Natural Movies"
 GRATING_ORIENTATIONS = frozenset((0, 45, 90, 135, 180, 225, 270, 315, 359))
 MAX_ENDPOINT_EXTRAPOLATION_FRAMES = 2.0
+# Quality policy, not an accuracy guarantee: reject interpolation across more
+# than three typical *logged* photodiode periods (not matched-anchor periods).
+MAX_INTERPOLATION_GAP_FACTOR = 3.0
+MOVIE_FRAME_STATUS = {"anchored": 0, "interpolated": 1, "extrapolated": 2, "unsupported": 3}
+MOVIE_FRAME_COLUMNS = {
+    "movie_frame_timestamps": (np.float64,
+        "Estimated movie-frame onsets in seconds relative to the first SLAP2 DO0 pulse, "
+        "on the normalized HARP clock. Piecewise-linear photodiode alignment; NaN means "
+        "unsupported. Not independent optical measurements of every movie frame."),
+    "movie_frame_numbers": (np.int64,
+        "Original 1-based MovieFrame-N logger counters, reset per presentation; "
+        "not independently verified decoded MP4 frame indices."),
+    "movie_display_frames": (np.int64,
+        "Global logger Frame coordinates for MovieFrame events, not movie frame indices."),
+    "movie_frame_timing_status": (np.uint8,
+        "Per-frame timing quality: 0=photodiode anchor, 1=interpolated, "
+        "2=bounded endpoint extrapolation, 3=unsupported (timestamp NaN). "
+        "Unsupported includes large anchor gaps and frames beyond a censored block."),
+}
 MOVIE_URL_BASE = (
     "https://github.com/AllenNeuralDynamics/ophys-passive-visual-stim/blob/"
     "37c9c03611f6e16b285dac6aae589f6a285e78ad/src/Movies/"
@@ -136,7 +155,7 @@ def read_presentation_frames(stimulus_table, logger_path):
         "stimulus_table_row", "start_frame", "stop_frame", "stop_frame_source",
         "movie_frame_count", "start_time", "stop_time", "Duration", "slap2_trial_idx",
         "is_partial", "movie_url",
-    }
+    } | set(MOVIE_FRAME_COLUMNS)
     if reserved.intersection(stimulus_table.columns):
         raise ValueError("Random Natural Movies table contains reserved output columns")
     if logger_path is None:
@@ -212,10 +231,13 @@ def read_presentation_frames(stimulus_table, logger_path):
             break
         first_frame = events[position][2]
         is_partial = False
+        movie_frames = []
+        movie_numbers = []
         if row["TrialType"] == "movie":
             if events[position][:2] != ("MovieFrame", 1):
                 raise ValueError(f"Expected MovieFrame-1 for stimulus table row {row_id}")
             movie_frames = [first_frame]
+            movie_numbers = [events[position][1]]
             position += 1
             while position < len(events):
                 kind, counter, frame = events[position]
@@ -224,6 +246,7 @@ def read_presentation_frames(stimulus_table, logger_path):
                 if counter != len(movie_frames) + 1:
                     raise ValueError(f"Missing or duplicate MovieFrame counter at table row {row_id}")
                 movie_frames.append(frame)
+                movie_numbers.append(counter)
                 position += 1
             single_frame = len(movie_frames) == 1
             if single_frame:
@@ -316,6 +339,8 @@ def read_presentation_frames(stimulus_table, logger_path):
             "stop_frame_source": stop_source,
             "movie_frame_count": frame_count,
             "is_partial": is_partial,
+            "movie_display_frames": np.asarray(movie_frames, dtype=np.int64),
+            "movie_frame_numbers": np.asarray(movie_numbers, dtype=np.int64),
         })
     if position != len(events):
         raise ValueError("Logger contains extra presentation events after the stimulus table")
@@ -367,7 +392,51 @@ def _map_boundary_frames(frames, anchor_frames, anchor_times):
     return times, distances > 0, max(0.0, float(distances.max(initial=0)))
 
 
-def synchronize_presentations(stimulus_table, logger_path, harp_data):
+def _validate_frame_anchors(anchor_frames, anchor_times):
+    """Reject invalid maps before interpolation can hide nonmonotonic timing."""
+    anchor_frames = np.asarray(anchor_frames, dtype=float)
+    anchor_times = np.asarray(anchor_times, dtype=float)
+    if (
+        anchor_frames.ndim != 1 or anchor_times.shape != anchor_frames.shape
+        or len(anchor_frames) < 2
+        or not np.isfinite(anchor_frames).all() or not np.isfinite(anchor_times).all()
+        or np.any(np.diff(anchor_frames) <= 0) or np.any(np.diff(anchor_times) <= 0)
+    ):
+        raise ValueError("Photodiode anchors must be finite, strictly increasing paired arrays")
+    return anchor_frames, anchor_times
+
+
+def map_movie_frames(frames, anchor_frames, anchor_times, maximum_gap_frames):
+    """Map logged events without fabricating timestamps outside usable coverage.
+
+    Exact anchors remain supported even at the edge of a large gap. Endpoint
+    extension uses the same fit as interval boundaries, limited to two ticks.
+    """
+    anchor_frames, anchor_times = _validate_frame_anchors(anchor_frames, anchor_times)
+    if not np.isfinite(maximum_gap_frames) or maximum_gap_frames <= 0:
+        raise ValueError("maximum_gap_frames must be finite and positive")
+    frames = np.asarray(frames, dtype=float)
+    if frames.ndim != 1 or not np.isfinite(frames).all() or np.any(np.diff(frames) <= 0):
+        raise ValueError("Movie display frames must be finite and strictly increasing")
+    times = np.full(len(frames), np.nan, dtype=np.float64)
+    status = np.full(len(frames), MOVIE_FRAME_STATUS["unsupported"], dtype=np.uint8)
+    right = np.searchsorted(anchor_frames, frames)
+    clipped_right = np.minimum(right, len(anchor_frames) - 1)
+    anchored = frames == anchor_frames[clipped_right]
+    interior = (right > 0) & (right < len(anchor_frames)) & ~anchored
+    gaps = anchor_frames[clipped_right] - anchor_frames[np.maximum(right - 1, 0)]
+    interpolated = interior & (gaps <= maximum_gap_frames)
+    distance = np.maximum(anchor_frames[0] - frames, frames - anchor_frames[-1])
+    extrapolated = (distance > 0) & (distance <= MAX_ENDPOINT_EXTRAPOLATION_FRAMES)
+    supported = anchored | interpolated | extrapolated
+    times[supported], _, _ = _map_boundary_frames(frames[supported], anchor_frames, anchor_times)
+    status[anchored] = MOVIE_FRAME_STATUS["anchored"]
+    status[interpolated] = MOVIE_FRAME_STATUS["interpolated"]
+    status[extrapolated] = MOVIE_FRAME_STATUS["extrapolated"]
+    return times, status
+
+
+def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_interpolation_gap_frames=None):
     """Align all playback boundaries once; DO2 cannot replace missing offsets."""
     blocks, gratings = read_presentation_frames(stimulus_table, logger_path)
     recovery_warnings = list(blocks.attrs["recovery_warnings"])
@@ -380,6 +449,14 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data):
     anchor_frames, anchor_times, qc = stimulus_sync.align_logger_frames_to_harp(
         logger_data, harp_times, harp_states,
     )
+    anchor_frames, anchor_times = _validate_frame_anchors(anchor_frames, anchor_times)
+    logged_frame_count = int(blocks["movie_frame_count"].sum())
+    if maximum_interpolation_gap_frames is None:
+        maximum_interpolation_gap_frames = MAX_INTERPOLATION_GAP_FACTOR * float(
+            np.median(np.diff(logger_data.transition_frames))
+        )
+    if not np.isfinite(maximum_interpolation_gap_frames) or maximum_interpolation_gap_frames <= 0:
+        raise ValueError("maximum_interpolation_gap_frames must be finite and positive")
     # Recover the supported portion of an interrupted recording even when
     # its final photodiode state has no closing edge. Do not extend through
     # an unanchored tail or discard earlier well-aligned presentations.
@@ -418,6 +495,54 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data):
             or ((table["Duration"] == 0) & ~table["is_partial"]).any()
         ):
             raise ValueError("Aligned intervals must have positive durations, except zero-length censored observations")
+    timestamp_rows = []
+    status_rows = []
+    for row in blocks.itertuples():
+        times, status = map_movie_frames(
+            row.movie_display_frames, anchor_frames, anchor_times,
+            maximum_interpolation_gap_frames,
+        )
+        # Preserve every event in retained blocks, even after an offset was
+        # clipped. Unsupported events must not acquire a time beyond that block.
+        outside_block = (row.movie_display_frames < row.start_frame) | (row.movie_display_frames > row.stop_frame)
+        times[outside_block] = np.nan
+        status[outside_block] = MOVIE_FRAME_STATUS["unsupported"]
+        timestamp_rows.append(times)
+        status_rows.append(status)
+    blocks["movie_frame_timestamps"] = timestamp_rows
+    blocks["movie_frame_timing_status"] = status_rows
+    all_status = np.concatenate(status_rows)
+    status_counts = {name: int(np.count_nonzero(all_status == code)) for name, code in MOVIE_FRAME_STATUS.items()}
+    if status_counts["unsupported"]:
+        message = f"{status_counts['unsupported']} logged movie frames have unsupported timing; retaining counters with NaN timestamps."
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        recovery_warnings.append(message)
+    frame_metadata = {
+        "clock_reference": "seconds relative to first SLAP2 DO0 pulse (normalized HARP)",
+        "mapping_method": "piecewise_linear_matched_photodiode_anchors",
+        "frame_identity": "original 1-based MovieFrame-N logger counter; decoded MP4 index unverified",
+        "accuracy_note": "Aligned onset estimates, not per-frame optical measurements; affine residuals are not timing uncertainty.",
+        "maximum_endpoint_extrapolation_frames": MAX_ENDPOINT_EXTRAPOLATION_FRAMES,
+        "maximum_interpolation_gap_frames": float(maximum_interpolation_gap_frames),
+        "default_gap_policy": "3 times median logger photodiode transition spacing",
+        "median_anchor_gap_frames": float(np.median(np.diff(anchor_frames))),
+        "maximum_anchor_gap_frames": float(np.max(np.diff(anchor_frames))),
+        "maximum_anchor_gap_seconds": float(np.max(np.diff(anchor_times))),
+        "large_anchor_gap_count": int(np.count_nonzero(np.diff(anchor_frames) > maximum_interpolation_gap_frames)),
+        "status_codes": MOVIE_FRAME_STATUS.copy(),
+        "status_counts": status_counts,
+        "logged_frame_count": logged_frame_count,
+        "stored_frame_count": len(all_status),
+        "omitted_frame_count": logged_frame_count - len(all_status),
+        "omission_policy": "Existing interval recovery omits whole blocks starting beyond usable coverage; all events in retained blocks are preserved.",
+        "alignment_qc": qc.__dict__.copy(),
+    }
+    if "time_reference" in harp_data:
+        frame_metadata["harp_time_reference_seconds"] = float(harp_data["time_reference"])
+    blocks.attrs["movie_frame_alignment"] = {
+        "anchor_frames": anchor_frames, "anchor_times": anchor_times,
+        "metadata": frame_metadata,
+    }
     metadata = {
         "source": "logger_photodiode_aligned",
         "logger_format": LOGGER_FORMAT,
@@ -440,5 +565,6 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data):
         "extrapolated_boundary_count": extrapolated_count,
         "maximum_endpoint_extrapolation_frames": maximum_extrapolation,
         "stimulus_qc": "skipped_for_random_natural_movies",
+        "movie_frame_timing": frame_metadata,
     }
     return blocks, gratings, metadata
