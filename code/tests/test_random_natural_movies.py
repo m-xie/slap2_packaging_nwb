@@ -105,6 +105,32 @@ class RandomNaturalMoviesTests(unittest.TestCase):
             blocks[["start_frame", "stop_frame"]], changed[["start_frame", "stop_frame"]],
         )
 
+    def test_movie_urls_match_all_supplied_assets(self):
+        filenames = [
+            "Natural_Movie_TOE_1.mp4", "Natural_Movie_TOE_2.mp4",
+            "Natural_Movie_TOE_3.mp4", "natural_movie_TOE_1_shuffle.mp4",
+            "natural_movie_TOE_2_shuffle.mp4", "natural_movie_TOE_3_shuffle.mp4",
+            "zebra_allen_screen_tscale_30_scale_10.mp4",
+        ]
+        base = (
+            "https://github.com/AllenNeuralDynamics/ophys-passive-visual-stim/blob/"
+            "37c9c03611f6e16b285dac6aae589f6a285e78ad/src/Movies/"
+        )
+        self.table, self.logger = example_session(("movie",) * 8 + ("gratings",))
+        self.table["TextureName"] = [
+            filename.removesuffix(".mp4").lower() for filename in filenames
+        ] + ["unknown_movie", "Natural_Movie_TOE_1"]
+        original = self.table.copy(deep=True)
+        blocks, gratings = self.read_frames()
+        self.assertEqual(blocks.movie_url.tolist(), [base + name for name in filenames] + ["", ""])
+        self.assertNotIn("movie_url", gratings)
+        pd.testing.assert_frame_equal(self.table, original)
+
+    def test_movie_url_is_reserved_output_column(self):
+        self.table["movie_url"] = "untrusted_input"
+        with self.assertRaisesRegex(ValueError, "reserved output columns"):
+            self.read_frames()
+
     def test_missing_movie_counter_is_rejected(self):
         self.logger = self.logger.drop(self.logger.index[self.logger.Value.eq("MovieFrame-3")][0])
         with self.assertRaisesRegex(ValueError, "Missing or duplicate MovieFrame"):
@@ -352,6 +378,8 @@ class RandomNaturalMoviesTests(unittest.TestCase):
     @patch("stimulus_sync.align_logger_frames_to_harp")
     @patch("stimulus_sync.extract_harp_photodiode_transitions")
     def test_nwb_round_trip_and_provenance(self, extract, align):
+        self.table.loc[0, "TextureName"] = "natural_movie_TOE_1"
+        self.table.loc[1, "TextureName"] = "natural_movie_TOE_2_shuffle"
         self.read_frames()
         table_path = self.root / "stim_table.csv"
         self.table.to_csv(table_path, index=False)
@@ -392,6 +420,12 @@ class RandomNaturalMoviesTests(unittest.TestCase):
                     gratings = result.intervals["gratings"].to_dataframe()
                     self.assertEqual(len(blocks), 5)
                     self.assertEqual(len(gratings), 18)
+                    self.assertEqual(blocks.movie_url.tolist(), [
+                        movies.MOVIE_URLS["natural_movie_toe_1"],
+                        movies.MOVIE_URLS["natural_movie_toe_2_shuffle"],
+                        "", "", "",
+                    ])
+                    self.assertNotIn("movie_url", gratings)
                     for column, value, unit in (
                         ("SpatialFrequency", 0.08, "cycle/degree"),
                         ("TemporalFrequency", 3.0, "Hz"),

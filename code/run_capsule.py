@@ -748,6 +748,11 @@ def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisiti
         table["stop_time"].data.extend(frame_table.pop("stop_time").tolist())
         for column in frame_table:
             column_description = f"{column}: Random Natural Movies source metadata or playback-derived value"
+            if name == "stimulus_blocks" and column == "movie_url":
+                column_description = (
+                    "Commit-pinned GitHub movie URL matched by TextureName; "
+                    "empty for non-movie rows or unrecognized textures."
+                )
             if name == "gratings":
                 column_description = grating_descriptions.get(column, column_description)
             table.add_column(

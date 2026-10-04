@@ -19,6 +19,22 @@ import stimulus_sync
 LOGGER_FORMAT = "Random Natural Movies"
 GRATING_ORIENTATIONS = frozenset((0, 45, 90, 135, 180, 225, 270, 315, 359))
 MAX_ENDPOINT_EXTRAPOLATION_FRAMES = 2.0
+MOVIE_URL_BASE = (
+    "https://github.com/AllenNeuralDynamics/ophys-passive-visual-stim/blob/"
+    "37c9c03611f6e16b285dac6aae589f6a285e78ad/src/Movies/"
+)
+MOVIE_URLS = {
+    filename.removesuffix(".mp4").lower(): MOVIE_URL_BASE + filename
+    for filename in (
+        "Natural_Movie_TOE_1.mp4",
+        "Natural_Movie_TOE_2.mp4",
+        "Natural_Movie_TOE_3.mp4",
+        "natural_movie_TOE_1_shuffle.mp4",
+        "natural_movie_TOE_2_shuffle.mp4",
+        "natural_movie_TOE_3_shuffle.mp4",
+        "zebra_allen_screen_tscale_30_scale_10.mp4",
+    )
+}
 
 
 def add_grating_parameters(gratings, acquisition_json):
@@ -119,7 +135,7 @@ def read_presentation_frames(stimulus_table, logger_path):
     reserved = {
         "stimulus_table_row", "start_frame", "stop_frame", "stop_frame_source",
         "movie_frame_count", "start_time", "stop_time", "Duration", "slap2_trial_idx",
-        "is_partial",
+        "is_partial", "movie_url",
     }
     if reserved.intersection(stimulus_table.columns):
         raise ValueError("Random Natural Movies table contains reserved output columns")
@@ -312,6 +328,12 @@ def read_presentation_frames(stimulus_table, logger_path):
         ):
             raise ValueError("Playback intervals extend beyond the recorded display frames")
     blocks = pd.concat([blocks.iloc[:len(block_frames)], block_frames], axis=1)
+    # Preserve exact URL filename casing while matching source texture names.
+    # Empty strings keep non-movie and unknown entries serializable in NWB.
+    blocks["movie_url"] = (
+        blocks["TextureName"].str.lower().map(MOVIE_URLS).fillna("")
+        .where(blocks["TrialType"].eq("movie"), "")
+    )
     blocks.attrs["recovery_warnings"] = recovery_warnings
     blocks.attrs["has_session_end"] = session_end is not None
     grating_columns = [
