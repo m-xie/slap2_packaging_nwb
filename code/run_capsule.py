@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 import harp_utils
 import stimulus_sync
+import random_natural_movies
 from slap2_dat_utils import parse_dat_file, validate_dat_files
 import slap2_synching as slap2_sync
 import slap2_running_packaging as running_packaging
@@ -205,6 +206,12 @@ def write_data_process(
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--logger_format",
+        choices=["OpenScope P3", "Random Natural Movies", "Legacy Drifting Gratings"],
+        default="Legacy Drifting Gratings",
+        help="Visual stimulus format; selects playback parsing for Random Natural Movies and is recorded in provenance.",
+    )
     parser.add_argument("--input_session_dir", type=str, default="slap2_session")
     parser.add_argument("--input_processed_dir", type=str, default="slap2_processed")
     parser.add_argument("--stim_table_pattern", type=str, default="orientations_orientations0")
@@ -218,6 +225,7 @@ def main():
                         help="Onset delay in seconds for RF response windows (default: 0.2)")
     parser.add_argument("--qc_folder_name", type=str, default="qc")
     args = parser.parse_args()
+    logger_format = args.logger_format
     use_input_nwb = args.use_input_nwb.lower() in ('t', 'true')
     allow_skip_running = args.allow_skip_running.lower() in ('t', 'true')
     allow_skip_eye = args.allow_skip_eye.lower() in ('t', 'true')
@@ -280,7 +288,7 @@ def main():
     acquisition_json_path = next(session_path.glob("acquisition.json"))
     harp_path = next(session_path.rglob('*.harp'))
     experiment_summary_path = next(processed_path.rglob('*experiment_summary.h5'))
-    stim_table_csv = next((session_path / 'behavior').rglob(f'*{stim_table_pattern}*.csv'))
+    stim_table_csv = find_stimulus_table(session_path, stim_table_pattern, logger_format)
     try:
         log_csv = stimulus_sync.select_stimulus_logger(
             (session_path / 'behavior').rglob('*logger*.csv')
@@ -312,7 +320,7 @@ def main():
             (qc_folder / 'syncing').mkdir(exist_ok=True)
             stimulus_start_time = datetime.now().astimezone()
             stimulus_timing_metadata = add_stim_table(
-                nwbfile, stim_table_csv, log_csv, harp_data
+                nwbfile, stim_table_csv, log_csv, harp_data, logger_format
             )
             stimulus_end_time = datetime.now().astimezone()
             ophys_start_time = datetime.now().astimezone()
@@ -348,12 +356,7 @@ def main():
     packaging_end_time = datetime.now().astimezone()
     slap2_dff_qc.compute_dff_qc(qc_folder, result_nwb_path)
     slap2_dff_qc.compute_raw_fluorescence_qc(qc_folder, result_nwb_path)
-    zebra_movie_qc.plot_zebra_repeats(
-        result_nwb_path, qc_folder / 'zebra_movie'
-    )
-    slap2_rf_qc.compute_receptive_field_qc(qc_folder, result_nwb_path, onset_delay=rf_onset_delay)
-    stim_tuning_qc.compute_stim_tuning_qc(qc_folder, result_nwb_path)
-    stim_tuning_qc.compute_orientation_tuning_qc(qc_folder, result_nwb_path)
+    run_stimulus_qc(result_nwb_path, qc_folder, logger_format, rf_onset_delay)
     write_data_process(
         session_path=session_path,
         processed_path=processed_path,
@@ -365,6 +368,7 @@ def main():
         ophys_end_time=ophys_end_time,
         packaging_end_time=packaging_end_time,
         parameters={
+            "visual_stimulus_logger_format": logger_format,
             "use_input_nwb": use_input_nwb,
             "input_eye_tracking_dir": str(eye_tracking_path),
             "allow_skip_running": allow_skip_running,
@@ -375,6 +379,36 @@ def main():
         },
     )
     print(f'Wrote output slap2 nwb to {result_nwb_path}')
+
+
+def run_stimulus_qc(nwb_path, qc_folder, logger_format, rf_onset_delay):
+    """Retain existing stimulus QC only for the formats it supports."""
+    if logger_format == random_natural_movies.LOGGER_FORMAT:
+        print("Random Natural Movies: skipping stimulus-specific QC; general fluorescence QC is unchanged.")
+        return
+    zebra_movie_qc.plot_zebra_repeats(nwb_path, qc_folder / 'zebra_movie')
+    slap2_rf_qc.compute_receptive_field_qc(qc_folder, nwb_path, onset_delay=rf_onset_delay)
+    stim_tuning_qc.compute_stim_tuning_qc(qc_folder, nwb_path)
+    stim_tuning_qc.compute_orientation_tuning_qc(qc_folder, nwb_path)
+
+
+def find_stimulus_table(session_path, pattern, logger_format):
+    """Keep legacy selection; require an unambiguous table for the new format."""
+    behavior_path = Path(session_path) / "behavior"
+    candidates = behavior_path.rglob(f"*{pattern}*.csv")
+    if logger_format != random_natural_movies.LOGGER_FORMAT:
+        return next(candidates)
+    paths = sorted(candidates)
+    # The existing CLI/app-panel default names a legacy orientations table.
+    # Only the new format may fall back to the RandomNaturalMovies filename.
+    if not paths and pattern == "orientations_orientations0":
+        paths = sorted(behavior_path.rglob("*stim_table*.csv"))
+    if len(paths) != 1:
+        raise ValueError(
+            f"Random Natural Movies requires exactly one stimulus table, found {len(paths)}. "
+            "Set --stim_table_pattern to identify the intended table."
+        )
+    return paths[0]
 
 
 def get_dmd_name(plane_name_str):
@@ -600,7 +634,9 @@ def read_stim_csv(filepath):
     return df
 
 
-def add_stim_table(nwbfile, orientations_table, log_csv, harp_data):
+def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_format=None):
+    if logger_format == random_natural_movies.LOGGER_FORMAT:
+        return add_stim_table_movies(nwbfile, orientations_table, log_csv, harp_data)
     stimulus_df = read_stim_csv(orientations_table)
 
     slap2_start_times = harp_data['normalized_slap2_start']
@@ -665,6 +701,54 @@ def add_stim_table(nwbfile, orientations_table, log_csv, harp_data):
         nwbfile.add_time_intervals(table)
         print(f"Added intervals table '{block_name}' with {len(block_df)} rows and {len(block_df.columns)} columns")
 
+    return timing_metadata
+
+def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data):
+    """Preserve observed source table rows and their individual grating trials."""
+    blocks, gratings, timing_metadata = random_natural_movies.synchronize_presentations(
+        pd.read_csv(stim_table_csv), log_csv, harp_data,
+    )
+    for name, frame_table, description in (
+        (
+            "stimulus_blocks", blocks,
+            "Random Natural Movies: one interval per observed stimulus-table row, in order. "
+            "Movie offsets follow playback; grating blocks span first onset to last offset "
+            "and exclude unlogged outer blanks. TrialDuration is nominal metadata only. "
+            "is_partial marks censored observations; their stop_time is a lower bound, not a measured offset.",
+        ),
+        (
+            "gratings", gratings,
+            "Individual gratings, including blanks, presented with Random Natural Movies workflow. "
+            "stimulus_table_row refers to the zero-based stimulus_blocks id. "
+            "logger_orientation=359 denotes a blank with Orientation=NaN and is_blank=True. "
+            "is_partial marks a missing end event or photodiode-censored offset.",
+        ),
+    ):
+        if frame_table.empty:
+            continue
+        frame_table = frame_table.copy()
+        frame_table["slap2_trial_idx"] = [
+            find_slap2_trial_index(
+                time, harp_data["normalized_slap2_start"], harp_data["normalized_slap2_end"],
+            )
+            for time in frame_table["start_time"]
+        ]
+        table = pynwb.file.TimeIntervals(name=name, description=description)
+        table.id.data.extend(
+            frame_table["stimulus_table_row"].tolist()
+            if name == "stimulus_blocks" else range(len(frame_table))
+        )
+        table["start_time"].data.extend(frame_table.pop("start_time").tolist())
+        table["stop_time"].data.extend(frame_table.pop("stop_time").tolist())
+        for column in frame_table:
+            table.add_column(
+                name=column,
+                description=f"{column}: Random Natural Movies source metadata or playback-derived value",
+                data=frame_table[column].tolist(),
+            )
+        nwbfile.add_time_intervals(table)
+        print(f"Added intervals table '{name}' with {len(frame_table)} rows")
+    print("stimulus timing:", timing_metadata)
     return timing_metadata
 
 

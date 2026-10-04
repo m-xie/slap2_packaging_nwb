@@ -94,6 +94,29 @@ class StimulusSyncTests(unittest.TestCase):
         self.assertLess(qc.p95_absolute_residual_ms, 10)
         self.assertEqual(len(anchor_frames), len(anchor_times))
 
+    def test_low_baseline_only_inserts_initial_high_state(self):
+        for initial_high in (False, True):
+            with self.subTest(initial_high=initial_high):
+                rows = [(10, 1.0, "STARTSLAP"), (10, 1.0, "StimStart-one")]
+                states = [initial_high, not initial_high, initial_high, not initial_high]
+                rows.extend((10 + i, 1 + i / 60, f"Photodiode-{int(state)}") for i, state in enumerate(states))
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "logger.csv"
+                    pd.DataFrame(rows, columns=["Frame", "Timestamp", "Value"]).to_csv(path, index=False)
+                    result = extract_logger_events(path, initial_low_baseline=True)
+                expected = [10, 11, 12, 13] if initial_high else [11, 12, 13]
+                np.testing.assert_array_equal(result.transition_frames, expected)
+
+    def test_observed_initial_falling_edge_is_not_removed(self):
+        rows = [(9, 0.9, "Photodiode-1"), (10, 1, "STARTSLAP"), (10, 1, "StimStart-one")]
+        rows.extend((10 + i, 1 + i / 60, f"Photodiode-{i % 2}") for i in range(4))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "logger.csv"
+            pd.DataFrame(rows, columns=["Frame", "Timestamp", "Value"]).to_csv(path, index=False)
+            result = extract_logger_events(path, initial_low_baseline=True)
+        np.testing.assert_array_equal(result.transition_frames, [10, 11, 12, 13])
+        self.assertFalse(result.transition_states[0])
+
     def test_do2_is_fallback_without_logger(self):
         expected = np.asarray([1.0, 2.0])
         result, metadata = resolve_stimulus_start_times(

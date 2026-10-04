@@ -3,6 +3,20 @@
 	"named_parameters": true,
 	"parameters": [
 		{
+			"id": "vSlfMt7Qp3RnLg01",
+			"name": "Logger Format",
+			"param_name": "logger_format",
+			"description": "Visual stimulus logger format used during the session.",
+			"type": "list",
+			"value_type": "string",
+			"default_value": "Legacy Drifting Gratings",
+			"extra_data": [
+				"OpenScope P3",
+				"Random Natural Movies",
+				"Legacy Drifting Gratings"
+			]
+		},
+		{
 			"id": "USGLmDt6NLdwb6QM",
 			"name": "Input NWB Dir",
 			"param_name": "input_nwb_dir",

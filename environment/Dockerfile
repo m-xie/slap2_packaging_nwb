@@ -10,14 +10,14 @@ RUN --mount=type=secret,id=git-access-token \
     GIT_ACCESS_TOKEN="$(cat /run/secrets/git-access-token)" \
     pip install -U --no-cache-dir \
     aind-data-schema==2.8.1 \
-    aind-nwb-utils==0.2.5 \
+    aind-nwb-utils==0.2.9 \
     argparse \
     h5py==3.14.0 \
     harp-python==0.4.1 \
-    hdmf-zarr==0.11.2 \
+    hdmf-zarr==0.13.0 \
     matplotlib==3.9.4 \
     pandas==2.2.3 \
-    pynwb==3.1.1 \
+    pynwb==4.2.0 \
     pyyaml==6.0.3 \
     tables==3.10.1 \
     -e git+https://github.com/AllenInstitute/openscope_upload.git@d54ae99620cb81f92cffa75ecf2fe66e9ee2e3b2#egg=openscope-upload

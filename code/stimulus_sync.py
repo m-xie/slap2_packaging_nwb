@@ -39,8 +39,15 @@ def select_stimulus_logger(candidate_paths):
     return duplicate_paths[0] if duplicate_paths else paths[0]
 
 
-def extract_logger_events(logger_path):
-    """Extract stimulus frames and expected photodiode state changes."""
+def extract_logger_events(logger_path, *, stimulus_frames=None, initial_low_baseline=False):
+    """Extract expected photodiode changes and stimulus display frames.
+
+    Format adapters may supply validated stimulus frames; by default the
+    existing StimStart-* parser and its validation are used unchanged.
+    With initial_low_baseline=True, only a high first state at STARTSLAP is
+    inserted as an initial edge. This assumes the pre-stimulus patch was low;
+    later state changes (including observed high-to-low changes) are unchanged.
+    """
     logger_path = Path(logger_path)
     table = pd.read_csv(logger_path)
     required_columns = {"Frame", "Timestamp", "Value"}
@@ -63,11 +70,14 @@ def extract_logger_events(logger_path):
     # markers remain ordinary frames within the global display-frame sequence.
     reference_frame = int(reference_rows.iloc[0]["Frame"])
 
-    stimulus_frames = table.loc[
-        values.str.startswith("StimStart-"), "Frame"
-    ].to_numpy(dtype=int)
-    if len(stimulus_frames) == 0:
-        raise ValueError(f"Logger {logger_path} contains no StimStart-* events")
+    if stimulus_frames is None:
+        stimulus_frames = table.loc[
+            values.str.startswith("StimStart-"), "Frame"
+        ].to_numpy(dtype=int)
+        if len(stimulus_frames) == 0:
+            raise ValueError(f"Logger {logger_path} contains no StimStart-* events")
+    else:
+        stimulus_frames = np.asarray(stimulus_frames, dtype=int)
 
     # Frame, wheel, and photodiode rows are interleaved. Only explicit
     # Photodiode-* rows describe the expected state of the display patch.
@@ -77,9 +87,12 @@ def extract_logger_events(logger_path):
     states = photodiode_rows["Value"].eq("Photodiode-1").to_numpy()
     transition_indices = np.flatnonzero(states[1:] != states[:-1]) + 1
     photodiode_frames = photodiode_rows["Frame"].to_numpy(dtype=int)
-    if len(photodiode_frames) and photodiode_frames[0] == reference_frame:
-        # The first displayed state is a physical edge from the pre-stimulus
-        # baseline and anchors stimulus starts on the STARTSLAP frame.
+    if (
+        len(photodiode_frames) and photodiode_frames[0] == reference_frame
+        and (not initial_low_baseline or states[0])
+    ):
+        # Preserve the historical first-state anchor by default. For a known
+        # low baseline, a first low state is not a physical transition.
         transition_indices = np.insert(transition_indices, 0, 0)
     if len(transition_indices) < 3:
         raise ValueError(
