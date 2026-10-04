@@ -21,6 +21,83 @@ GRATING_ORIENTATIONS = frozenset((0, 45, 90, 135, 180, 225, 270, 315, 359))
 MAX_ENDPOINT_EXTRAPOLATION_FRAMES = 2.0
 
 
+def add_grating_parameters(gratings, acquisition_json):
+    """Add constant acquisition settings, never nominal duration or delay.
+
+    DiameterX/Y follow the existing NWB grating column convention. Constants
+    also describe the configured stimulus on blank trials (Contrast=0), not
+    a visible grating. Missing metadata leaves older callers unchanged; varying
+    settings are rejected because logger events cannot disambiguate them.
+    """
+    gratings = gratings.copy()
+    if gratings.empty or acquisition_json is None:
+        return gratings, {}
+    fields = {
+        "SpatialFrequency": "GratingSpatialFrequency",
+        "TemporalFrequency": "GratingTemporalFrequency",
+        "DiameterX": "GratingDiameter",
+        "DiameterY": "GratingDiameter",
+        "X": "GratingX",
+        "Y": "GratingY",
+    }
+    keys = set(fields.values()) | {"GratingContrast"}
+    keys |= {key + "Unit" for key in fields.values()}
+    candidates = []
+    for index, epoch in enumerate(acquisition_json.get("stimulus_epochs") or []):
+        parameters = ((epoch.get("code") or {}).get("parameters") or {}).get("StimulusParameters") or {}
+        if any(key in parameters for key in fields.values()):
+            candidates.append((index, {key: parameters.get(key) for key in keys}))
+    if not candidates:
+        warnings.warn(
+            "No grating stimulus parameters in acquisition metadata; grating properties omitted.",
+            RuntimeWarning, stacklevel=2,
+        )
+        return gratings, {}
+    parameters = candidates[0][1]
+    if any(candidate != parameters for _, candidate in candidates[1:]):
+        raise ValueError("Ambiguous grating parameters across stimulus epochs")
+    sources = ", ".join(
+        f"acquisition.json stimulus_epochs[{index}].code.parameters.StimulusParameters"
+        for index, _ in candidates
+    )
+
+    def numeric_values(key):
+        raw = parameters.get(key)
+        if raw is None:
+            raise ValueError(f"Missing grating metadata: {key}")
+        try:
+            values = np.asarray(raw, dtype=float).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid grating metadata: {key}") from exc
+        if not len(values) or not np.isfinite(values).all():
+            raise ValueError(f"Invalid grating metadata: {key}")
+        return np.unique(values)
+
+    descriptions = {}
+    for column, key in fields.items():
+        values = numeric_values(key)
+        if len(values) != 1:
+            raise ValueError(f"Expected one constant value for {key}")
+        unit = parameters.get(key + "Unit")
+        if not isinstance(unit, str) or not unit.strip():
+            raise ValueError(f"Missing grating metadata unit: {key}Unit")
+        gratings[column] = values[0]
+        descriptions[column] = (
+            f"{column} ({unit}), from {sources}.{key}; "
+            "configured value also retained for blank presentations."
+        )
+    contrasts = numeric_values("GratingContrast")
+    nonblank = contrasts[contrasts != 0]
+    if len(nonblank) != 1 or (gratings["is_blank"].any() and 0 not in contrasts):
+        raise ValueError("GratingContrast must specify one nonblank contrast and zero for blanks")
+    gratings["Contrast"] = np.where(gratings["is_blank"], 0.0, nonblank[0])
+    descriptions["Contrast"] = (
+        f"Contrast (dimensionless), from {sources}.GratingContrast; "
+        "zero for logger_orientation=359 blanks, otherwise the unique nonzero contrast."
+    )
+    return gratings, descriptions
+
+
 def read_presentation_frames(stimulus_table, logger_path):
     """Return table-level and individual-grating intervals in display frames.
 

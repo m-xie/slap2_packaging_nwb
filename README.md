@@ -26,6 +26,14 @@ default, the new format falls back to a unique filename containing
 	identifies the parent block; `grating_in_block` is zero-based. The logger
 	value 359 is retained as `logger_orientation`, but represents `is_blank=True`
 	with `Orientation=NaN`, not a 359-degree grating.
+	Shared `SpatialFrequency`, `TemporalFrequency`, `DiameterX`, `DiameterY`,
+	`X`, `Y`, and `Contrast` are read from the acquisition metadata's
+	`stimulus_epochs[].code.parameters.StimulusParameters`. Column descriptions
+	include units and source fields. The circular `GratingDiameter` supplies
+	both diameter columns. Blank trials have zero contrast; other properties
+	retain the configured values. Nominal grating duration and delay are not
+	added. Missing stimulus metadata produces a warning; incomplete or ambiguous
+	settings are rejected rather than guessed.
 
 Both tables include aligned `start_time` and `stop_time`, measured `Duration`,
 source `start_frame` and `stop_frame`, and `slap2_trial_idx`. No movie identity

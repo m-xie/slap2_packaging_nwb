@@ -320,7 +320,8 @@ def main():
             (qc_folder / 'syncing').mkdir(exist_ok=True)
             stimulus_start_time = datetime.now().astimezone()
             stimulus_timing_metadata = add_stim_table(
-                nwbfile, stim_table_csv, log_csv, harp_data, logger_format
+                nwbfile, stim_table_csv, log_csv, harp_data, logger_format,
+                acquisition_json=acquisition_json,
             )
             stimulus_end_time = datetime.now().astimezone()
             ophys_start_time = datetime.now().astimezone()
@@ -634,9 +635,11 @@ def read_stim_csv(filepath):
     return df
 
 
-def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_format=None):
+def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_format=None, acquisition_json=None):
     if logger_format == random_natural_movies.LOGGER_FORMAT:
-        return add_stim_table_movies(nwbfile, orientations_table, log_csv, harp_data)
+        return add_stim_table_movies(
+            nwbfile, orientations_table, log_csv, harp_data, acquisition_json,
+        )
     stimulus_df = read_stim_csv(orientations_table)
 
     slap2_start_times = harp_data['normalized_slap2_start']
@@ -703,10 +706,13 @@ def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_forma
 
     return timing_metadata
 
-def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data):
+def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisition_json=None):
     """Preserve observed source table rows and their individual grating trials."""
     blocks, gratings, timing_metadata = random_natural_movies.synchronize_presentations(
         pd.read_csv(stim_table_csv), log_csv, harp_data,
+    )
+    gratings, grating_descriptions = random_natural_movies.add_grating_parameters(
+        gratings, acquisition_json,
     )
     for name, frame_table, description in (
         (
@@ -741,9 +747,12 @@ def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data):
         table["start_time"].data.extend(frame_table.pop("start_time").tolist())
         table["stop_time"].data.extend(frame_table.pop("stop_time").tolist())
         for column in frame_table:
+            column_description = f"{column}: Random Natural Movies source metadata or playback-derived value"
+            if name == "gratings":
+                column_description = grating_descriptions.get(column, column_description)
             table.add_column(
                 name=column,
-                description=f"{column}: Random Natural Movies source metadata or playback-derived value",
+                description=column_description,
                 data=frame_table[column].tolist(),
             )
         nwbfile.add_time_intervals(table)

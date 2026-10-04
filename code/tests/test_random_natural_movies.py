@@ -1,6 +1,8 @@
 """Playback parsing, NWB round-trip, and legacy isolation regression tests."""
 
 from datetime import datetime, timezone
+from copy import deepcopy
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -14,6 +16,18 @@ import hdmf_zarr
 import random_natural_movies as movies
 import run_capsule
 import stimulus_sync
+
+
+def example_acquisition():
+    return {"stimulus_epochs": [{"code": {"parameters": {"StimulusParameters": {
+        "GratingSpatialFrequency": [0.08], "GratingSpatialFrequencyUnit": "cycle/degree",
+        "GratingTemporalFrequency": [3.0], "GratingTemporalFrequencyUnit": "Hz",
+        "GratingDiameter": [270.0], "GratingDiameterUnit": "degree",
+        "GratingX": [5.0], "GratingXUnit": "degree",
+        "GratingY": [-2.0], "GratingYUnit": "degree",
+        "GratingContrast": [0.0, 0.75],
+        "GratingDuration": [99.0], "GratingDelay": [88.0],
+    }}}}]}
 
 
 def example_session(types=("movie", "movie", "gratings", "gratings", "movie")):
@@ -291,6 +305,50 @@ class RandomNaturalMoviesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "do not cover playback boundaries"):
             movies._map_boundary_frames([103], anchors, anchors * 0.02)
 
+    def test_grating_metadata_leaves_playback_and_input_unchanged(self):
+        _, original = self.read_frames()
+        saved = original.copy(deep=True)
+        enriched, descriptions = movies.add_grating_parameters(original, example_acquisition())
+        pd.testing.assert_frame_equal(original, saved)
+        pd.testing.assert_frame_equal(enriched[original.columns], original)
+        self.assertEqual(set(enriched) - set(original), set(descriptions))
+        self.assertTrue(enriched.loc[enriched.is_blank, "Orientation"].isna().all())
+        for acquisition in (None, {}):
+            if acquisition is None:
+                unchanged, descriptions = movies.add_grating_parameters(original, acquisition)
+            else:
+                with self.assertWarnsRegex(RuntimeWarning, "properties omitted"):
+                    unchanged, descriptions = movies.add_grating_parameters(original, acquisition)
+            pd.testing.assert_frame_equal(unchanged, original)
+            self.assertEqual(descriptions, {})
+        empty, descriptions = movies.add_grating_parameters(original.iloc[:0], {})
+        self.assertTrue(empty.empty)
+        self.assertEqual(descriptions, {})
+
+    def test_ambiguous_or_invalid_grating_metadata_is_rejected(self):
+        _, gratings = self.read_frames()
+        for key, value, message in (
+            ("GratingSpatialFrequency", [0.04, 0.08], "one constant value"),
+            ("GratingTemporalFrequency", [float("nan")], "Invalid grating metadata"),
+            ("GratingDiameter", None, "Missing grating metadata"),
+            ("GratingXUnit", None, "Missing grating metadata unit"),
+            ("GratingContrast", [0, 0.5, 1], "one nonblank contrast"),
+            ("GratingContrast", [0.5], "zero for blanks"),
+        ):
+            with self.subTest(key=key, value=value):
+                acquisition = example_acquisition()
+                acquisition["stimulus_epochs"][0]["code"]["parameters"]["StimulusParameters"][key] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    movies.add_grating_parameters(gratings, acquisition)
+        acquisition = example_acquisition()
+        acquisition["stimulus_epochs"].append(deepcopy(acquisition["stimulus_epochs"][0]))
+        enriched, descriptions = movies.add_grating_parameters(gratings, acquisition)
+        self.assertTrue(enriched.SpatialFrequency.eq(0.08).all())
+        self.assertIn("stimulus_epochs[1]", descriptions["SpatialFrequency"])
+        acquisition["stimulus_epochs"][1]["code"]["parameters"]["StimulusParameters"]["GratingX"] = [7]
+        with self.assertRaisesRegex(ValueError, "Ambiguous grating parameters"):
+            movies.add_grating_parameters(gratings, acquisition)
+
     @patch("stimulus_sync.align_logger_frames_to_harp")
     @patch("stimulus_sync.extract_harp_photodiode_transitions")
     def test_nwb_round_trip_and_provenance(self, extract, align):
@@ -303,7 +361,10 @@ class RandomNaturalMoviesTests(unittest.TestCase):
         align.return_value = (frames, 0.5 + frames * 0.02, qc)
         nwb = pynwb.NWBFile("test", "test", datetime.now(timezone.utc))
         harp_data = {"normalized_slap2_start": np.array([0.0]), "normalized_slap2_end": np.array([])}
-        metadata = run_capsule.add_stim_table(nwb, table_path, self.path, harp_data, movies.LOGGER_FORMAT)
+        metadata = run_capsule.add_stim_table(
+            nwb, table_path, self.path, harp_data, movies.LOGGER_FORMAT,
+            acquisition_json=example_acquisition(),
+        )
         align.assert_called_once()
         self.assertEqual(metadata["stimulus_table_row_count"], 5)
         self.assertEqual(metadata["grating_presentation_count"], 18)
@@ -316,7 +377,10 @@ class RandomNaturalMoviesTests(unittest.TestCase):
                     # HDMF binds a written container to its original source.
                     # Build a fresh file to test a second storage backend.
                     nwb = pynwb.NWBFile("test", "test-zarr", datetime.now(timezone.utc))
-                    run_capsule.add_stim_table(nwb, table_path, self.path, harp_data, movies.LOGGER_FORMAT)
+                    run_capsule.add_stim_table(
+                        nwb, table_path, self.path, harp_data, movies.LOGGER_FORMAT,
+                        acquisition_json=example_acquisition(),
+                    )
                 path = self.root / name
                 with io_class(str(path), "w") as io:
                     io.write(nwb)
@@ -328,6 +392,25 @@ class RandomNaturalMoviesTests(unittest.TestCase):
                     gratings = result.intervals["gratings"].to_dataframe()
                     self.assertEqual(len(blocks), 5)
                     self.assertEqual(len(gratings), 18)
+                    for column, value, unit in (
+                        ("SpatialFrequency", 0.08, "cycle/degree"),
+                        ("TemporalFrequency", 3.0, "Hz"),
+                        ("DiameterX", 270.0, "degree"),
+                        ("DiameterY", 270.0, "degree"),
+                        ("X", 5.0, "degree"), ("Y", -2.0, "degree"),
+                    ):
+                        self.assertTrue(gratings[column].eq(value).all())
+                        self.assertNotIn(column, blocks)
+                        description = result.intervals["gratings"][column].description
+                        self.assertIn(unit, description)
+                        self.assertIn("acquisition.json stimulus_epochs[0]", description)
+                    self.assertTrue(gratings.loc[gratings.is_blank, "Contrast"].eq(0).all())
+                    self.assertTrue(gratings.loc[~gratings.is_blank, "Contrast"].eq(0.75).all())
+                    self.assertTrue(gratings.loc[gratings.is_blank, "Orientation"].isna().all())
+                    np.testing.assert_allclose(gratings.Duration, 0.08)
+                    np.testing.assert_allclose(gratings.Duration, gratings.stop_time - gratings.start_time)
+                    for column in ("GratingDuration", "GratingDelay", "NominalDuration", "NominalDelay", "Delay"):
+                        self.assertNotIn(column, gratings)
                     self.assertTrue(blocks.TrialDuration.eq(9999).all())
                     np.testing.assert_allclose(blocks.start_time, 0.5 + blocks.start_frame * 0.02)
                     np.testing.assert_allclose(blocks.stop_time, 0.5 + blocks.stop_frame * 0.02)
@@ -349,12 +432,15 @@ class RandomNaturalMoviesTests(unittest.TestCase):
                 table.to_csv(path, index=False)
                 nwb = pynwb.NWBFile("test", "legacy", datetime.now(timezone.utc))
                 harp_data = {"normalized_slap2_start": np.array([0.0]), "normalized_slap2_end": np.array([10.0])}
-                metadata = run_capsule.add_stim_table(nwb, path, None, harp_data, format_name)
+                metadata = run_capsule.add_stim_table(
+                    nwb, path, None, harp_data, format_name, acquisition_json=example_acquisition(),
+                )
                 resolve.assert_called_with(2, harp_data, None)
                 self.assertEqual(metadata, {"source": "harp_do2_fallback"})
                 expected_names = {"movie", "standard_control"} if column else {"gratings"}
                 self.assertEqual(set(nwb.intervals), expected_names)
                 output = pd.concat([t.to_dataframe() for t in nwb.intervals.values()])
+                self.assertNotIn("SpatialFrequency", output)
                 np.testing.assert_allclose(output.start_time, [1.0, 3.0])
                 np.testing.assert_allclose(output.stop_time, [2.0, 5.0])
 
@@ -393,6 +479,21 @@ ATTACHED_BEHAVIOR = Path(__file__).resolve().parents[2] / "data" / "878030_2026-
 
 
 class AttachedRandomMoviesTests(unittest.TestCase):
+    @unittest.skipUnless((ATTACHED_BEHAVIOR.parent / "acquisition.json").is_file(), "Session asset not attached")
+    def test_attached_grating_acquisition_metadata(self):
+        with (ATTACHED_BEHAVIOR.parent / "acquisition.json").open() as stream:
+            acquisition = json.load(stream)
+        gratings, _ = movies.add_grating_parameters(
+            pd.DataFrame({"is_blank": [False, True]}), acquisition,
+        )
+        self.assertEqual(gratings.SpatialFrequency.tolist(), [0.04, 0.04])
+        self.assertEqual(gratings.TemporalFrequency.tolist(), [2.0, 2.0])
+        self.assertEqual(gratings.DiameterX.tolist(), [360.0, 360.0])
+        self.assertEqual(gratings.DiameterY.tolist(), [360.0, 360.0])
+        self.assertEqual(gratings.X.tolist(), [0.0, 0.0])
+        self.assertEqual(gratings.Y.tolist(), [0.0, 0.0])
+        self.assertEqual(gratings.Contrast.tolist(), [1.0, 0.0])
+
     @unittest.skipUnless((ATTACHED_BEHAVIOR / "bonvision_logger.csv").is_file(), "Session asset not attached")
     def test_attached_session_counts_and_sequence(self):
         source = pd.read_csv(ATTACHED_BEHAVIOR / "stim_table.csv")
