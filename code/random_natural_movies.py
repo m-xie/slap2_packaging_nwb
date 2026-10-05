@@ -567,7 +567,7 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_in
         "grating_block_bounds": "first_grating_start_to_last_grating_end_excluding_unlogged_outer_blanks",
         "extrapolated_boundary_count": extrapolated_count,
         "maximum_endpoint_extrapolation_frames": maximum_extrapolation,
-        "stimulus_qc": "skipped_for_random_natural_movies",
+        "stimulus_qc": "random_natural_movies_activity_qc",
         "movie_frame_timing": frame_metadata,
     }
     return blocks, gratings, metadata

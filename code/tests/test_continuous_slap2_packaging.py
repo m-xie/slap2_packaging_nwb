@@ -364,13 +364,31 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
             self.package()
         self.read_metadata.assert_not_called()
 
-    def test_initial_high_is_not_used_as_first_cycle(self):
-        self.harp["slap2_cycle_clock_signal"] = np.insert(self.harp["slap2_cycle_clock_signal"], 0, True)
-        self.harp["slap2_cycle_clock_times"] = np.insert(self.harp["slap2_cycle_clock_times"], 0, -1.5)
+    def test_initial_high_is_counted_as_first_cycle(self):
+        # Start the event stream at its first high sample instead of inventing
+        # another pulse before an already complete four-pulse clock.
+        self.harp["slap2_cycle_clock_signal"] = self.harp["slap2_cycle_clock_signal"][1:]
+        self.harp["slap2_cycle_clock_times"] = self.harp["slap2_cycle_clock_times"][1:]
         with self.assertWarnsRegex(RuntimeWarning, "DI3 initially starts high"):
             self.package()
         self.assert_packaged("DMD1", [0.0, 0.5, 2.0, 3.25])
-        self.assertEqual(self.assert_qc_metadata("DMD1")["clock"]["detected_pulse_count"], 4)
+        self.assert_packaged("DMD2", [0.0, 1.0, 2.5, 3.5])
+        clock = self.assert_qc_metadata("DMD1")["clock"]
+        self.assertEqual(clock["detected_pulse_count"], 4)
+        self.assertEqual(clock["first_pulse_timestamp"], -0.5)
+        self.assertTrue(clock["initial_signal_high"])
+        self.assertFalse(clock["onset_warning"])
+        self.assertEqual(clock["extra_final_pulse_count"], 1)
+
+    def test_additional_initial_high_exceeding_raw_cycle_limit_is_rejected(self):
+        # Initial high counts as a pulse: five pulses cannot fit three raw
+        # cycles plus the one permitted final boundary.
+        self.harp["slap2_cycle_clock_signal"] = np.insert(self.harp["slap2_cycle_clock_signal"], 0, True)
+        self.harp["slap2_cycle_clock_times"] = np.insert(self.harp["slap2_cycle_clock_times"], 0, -1.5)
+        with self.assertWarnsRegex(RuntimeWarning, "DI3 initially starts high"):
+            with self.assertRaisesRegex(ValueError, "Detected 5 DI3 pulses for 3 raw cycles"):
+                self.package()
+        self.sync.assert_not_called()
 
     def test_sourceless_primary_still_controls_secondary_clock_and_raw_limit(self):
         del self.summary["Path1"]["sources"]

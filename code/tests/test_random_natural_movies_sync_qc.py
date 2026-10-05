@@ -60,7 +60,10 @@ class RandomNaturalMoviesSyncQCTests(unittest.TestCase):
         self.assertIn("Detected analog photodiode edges: 7", text)
         self.assertIn("Detected BonVision frame edges: 7", text)
         self.assertNotIn("Matched pairs", text)
-        self.assertIn("translation only, no fitted scaling", text)
+        # Each window only displays three edges; the title still reports all
+        # seven. Axis scaling is tested numerically, not via optional prose.
+        for ax in fig.axes:
+            self.assertEqual(len(ax.collections[0].get_segments()), 3)
 
     def test_long_logger_span_is_not_stretched_or_clipped(self):
         fig = self.photodiode_figure(frames=[600, 660, 780], times=[10, 10.5, 11])

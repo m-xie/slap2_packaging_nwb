@@ -22,6 +22,7 @@ from qc import slap2_dff_qc
 from qc import slap2_receptive_fields_qc as slap2_rf_qc
 from qc import stim_tuning_qc
 from qc import zebra_movie_qc
+from qc import random_natural_movies_activity_qc
 from qc.random_natural_movies_sync_qc import plot_di3_sync
 import json
 import pandas as pd
@@ -310,7 +311,8 @@ def main():
     packaging_end_time = datetime.now().astimezone()
     slap2_dff_qc.compute_dff_qc(qc_folder, result_nwb_path)
     slap2_dff_qc.compute_raw_fluorescence_qc(qc_folder, result_nwb_path)
-    run_stimulus_qc(result_nwb_path, qc_folder, logger_format, rf_onset_delay)
+    run_stimulus_qc(result_nwb_path, qc_folder, logger_format, rf_onset_delay,
+                    experiment_summary_path=experiment_summary_path)
     write_data_process(
         session_path=session_path,
         processed_path=processed_path,
@@ -335,10 +337,12 @@ def main():
     print(f'Wrote output slap2 nwb to {result_nwb_path}')
 
 
-def run_stimulus_qc(nwb_path, qc_folder, logger_format, rf_onset_delay):
-    """Retain existing stimulus QC only for the formats it supports."""
+def run_stimulus_qc(nwb_path, qc_folder, logger_format, rf_onset_delay, *, experiment_summary_path=None):
+    """Dispatch format-specific activity QC without changing legacy analyses."""
     if logger_format == random_natural_movies.LOGGER_FORMAT:
-        print("Random Natural Movies: skipping stimulus-specific QC; general fluorescence QC is unchanged.")
+        if experiment_summary_path is None:
+            raise ValueError("Random Natural Movies activity QC requires experiment_summary_path for analyzeHz")
+        random_natural_movies_activity_qc.compute_activity_qc(qc_folder, nwb_path, experiment_summary_path)
         return
     zebra_movie_qc.plot_zebra_repeats(nwb_path, qc_folder / 'zebra_movie')
     slap2_rf_qc.compute_receptive_field_qc(qc_folder, nwb_path, onset_delay=rf_onset_delay)

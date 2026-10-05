@@ -155,6 +155,51 @@ not establish sub-frame precision. Zero residual at an interpolation anchor is
 not a timing-accuracy measurement. Validate logger event semantics and optical
 timing before interpreting these counters as exact MP4-frame onsets.
 
+#### Random Natural Movies activity QC
+
+Additional PNGs are written under the QC activity folder, leaving whole-session
+activity QC and legacy-format analyses unchanged:
+
+- One green **sum(dF) / sum(F0) across extracted-source ROIs per DMD**.
+	This excludes the separately packaged user-drawn soma series; it does not
+	spatially subtract soma masks from the extracted-source ROIs. At each source
+	sample, both sums use the same ROIs with finite dF and F0. dF is recovered from
+	stored dF/F as `dFF * (F0 + 1e-6)`, reversing the packaging formula. Missing
+	or zero summed baselines remain NaN. Missing F0 skips the population plot
+	with a warning; there is no fallback to averaging individual dF/F traces.
+- One red dF/F PNG **per soma**, identified by DMD, original user ROI index, and
+	label. Missing/empty channels are skipped with a warning.
+
+Each figure follows the movie/shuffled movie, zebra, and nine grating/blank
+condition ordering. Heatmap rows are chronological repeats, followed by the
+repeat-average trace and the number of finite contributing repeats at each
+sample. Partial repeats are retained and marked `*`; unavailable tails and
+internal gaps are gray/NaN, not zero. Color limits are shared within each PNG
+at the 1st/99th percentiles (outliers saturate); mean axes use a shared full range.
+
+The sampling grid uses `min(100, analyzeHz)` Hz: 10 ms spacing unless the
+experiment summary's positive scalar `params/analyzeHz` (also accepts
+`params/analyze_hz`) is lower, in which case that lower rate is used. There is
+no fallback for a missing rate. This sets the display/resampling rate, not an
+accuracy guarantee; values are interpolated, not averaged within bins.
+
+- **Movies and zebra:** align matching logged movie-frame numbers using each
+	repeat's stored photodiode-derived frame timestamps. The x-axis is nominal
+	content time `(MovieFrame - 1) / 30`, sampled at `min(100, analyzeHz)` Hz, not elapsed HARP
+	time. Fractional frames interpolate only between adjacent supported frames.
+	A complete interval supplies the last frame's end; a partial interval does
+	not acquire an invented endpoint. Original and shuffled textures never pool.
+- **Gratings:** align to the stored onset in real seconds with 0.5 s before and
+	after the observed presentation, without time stretching or extra baseline
+	subtraction. Observed offsets are orange marks (median offset in the mean
+	panel). A partial trial stops at its censoring bound with no post-offset flank.
+	Flanks can contain neighboring stimulus activity; they are not assumed blank.
+
+All activity comes from the existing synchronized NWB dF/F series. Interpolation
+does not clamp beyond a trace, bridge NaN samples, or cross timestamp gaps longer
+than three times the larger of the median sample period and `1 / analyzeHz`.
+No synchronization, dF/F baseline, or stored NWB values are recomputed.
+
 #### Continuous SLAP2 synchronization
 
 For **Random Natural Movies**, SLAP2 is always treated as one continuous raw
@@ -294,16 +339,11 @@ before changing established synchronization behavior.
 
 ### QC
 
-Stimulus-specific QC (Zebra repeats, receptive fields, stimulus tuning, and
-orientation tuning) is skipped for this format for now. General fluorescence,
-running, eye, and synchronization processing/QC remain unchanged. Existing
-formats continue to run the original stimulus-specific QC.
-
-Random Natural Movies packaging additionally writes a movie-frame timing PNG
-inside the QC synchronization directory. It shows within-block inter-frame
-intervals without bridging missing timestamps, anchor affine residuals
-(explicitly **not** accuracy estimates), and global-frame coverage with anchor
-spacing and unsupported/extrapolated events.
+Random Natural Movies uses the activity heatmaps and trial averages described
+above, instead of the legacy Zebra-repeat, receptive-field, stimulus-tuning,
+and orientation-tuning analyses. Its two synchronization PNGs remain in the
+separate syncing directory. General fluorescence, running, and eye QC remain
+unchanged. Other logger formats continue to run their original QC paths.
 
 ## Tests
 

@@ -397,7 +397,7 @@ class RandomNaturalMoviesTests(unittest.TestCase):
         self.assertEqual(metadata["stimulus_table_row_count"], 5)
         self.assertEqual(metadata["grating_presentation_count"], 18)
         self.assertEqual(metadata["blank_presentation_count"], 2)
-        self.assertEqual(metadata["stimulus_qc"], "skipped_for_random_natural_movies")
+        self.assertEqual(metadata["stimulus_qc"], "random_natural_movies_activity_qc")
         self.assertEqual(metadata["extrapolated_boundary_count"], 0)
         for name, io_class in (("test.nwb", pynwb.NWBHDF5IO), ("test.nwb.zarr", hdmf_zarr.NWBZarrIO)):
             with self.subTest(storage=name):
@@ -496,12 +496,17 @@ class RandomNaturalMoviesTests(unittest.TestCase):
     @patch("run_capsule.stim_tuning_qc.compute_stim_tuning_qc")
     @patch("run_capsule.slap2_rf_qc.compute_receptive_field_qc")
     @patch("run_capsule.zebra_movie_qc.plot_zebra_repeats")
-    def test_only_new_format_skips_stimulus_qc(self, zebra, rf, tuning, orientation):
-        run_capsule.run_stimulus_qc("input", self.root, movies.LOGGER_FORMAT, 0.2)
+    def test_new_format_activity_qc_keeps_legacy_dispatch(self, zebra, rf, tuning, orientation):
+        with patch.object(run_capsule.random_natural_movies_activity_qc, "compute_activity_qc") as activity:
+            run_capsule.run_stimulus_qc("input", self.root, movies.LOGGER_FORMAT, 0.2,
+                                      experiment_summary_path="summary.h5")
+            activity.assert_called_once_with(self.root, "input", "summary.h5")
+            for format_name in ("OpenScope P3", "Legacy Drifting Gratings"):
+                run_capsule.run_stimulus_qc("input", self.root, format_name, 0.2)
+            self.assertEqual(activity.call_count, 1)
+        # Exactly the two legacy calls, never the Random Natural Movies call.
         for mock in (zebra, rf, tuning, orientation):
-            mock.assert_not_called()
-        for format_name in ("OpenScope P3", "Legacy Drifting Gratings"):
-            run_capsule.run_stimulus_qc("input", self.root, format_name, 0.2)
+            self.assertEqual(mock.call_count, 2)
         zebra.assert_called_with("input", self.root / "zebra_movie")
         rf.assert_called_with(self.root, "input", onset_delay=0.2)
         tuning.assert_called_with(self.root, "input")
