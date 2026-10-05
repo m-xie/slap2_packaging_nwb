@@ -105,6 +105,12 @@ plot, but are **not saved in NWB**. The per-frame arrays remain in
 external processing provenance under `stimulus_timing.movie_frame_timing`;
 the original HARP clock offset is recorded when available.
 
+The movie timing QC figure includes a scatter plot of consecutive matched
+photodiode changes: display-frame differences on the x-axis and analog-detected
+time differences in milliseconds on the y-axis. These use matched photodiode
+anchors, not interpolated movie timestamps. Intervals may span unmatched
+transitions; invalid or non-increasing pairs are omitted without bridging them.
+
 **Precision caveat:** timestamps are photodiode-aligned onset estimates, not
 independent optical measurements of every movie frame. Logger/render ordering,
 display scanout, ADC sampling, and edge-matching ambiguity can limit accuracy.

@@ -7,7 +7,7 @@ import numpy as np
 
 
 def plot_movie_frame_timing(blocks, output_path):
-    """Save a three-panel timing diagnostic as PNG and return its ``Path``.
+    """Save a four-panel timing diagnostic as PNG and return its ``Path``.
 
     ``blocks`` contains ragged movie_frame_timestamps (seconds),
     movie_display_frames (global logger frames), and movie_frame_timing_status
@@ -20,6 +20,11 @@ def plot_movie_frame_timing(blocks, output_path):
     describe deviation from a constant frame clock, not timing accuracy.
     Coverage rugs use axis-relative vertical lanes, not gap values, so even
     unsupported frames without timestamps are shown on the global frame axis.
+    The scatter compares consecutive matched photodiode transitions: display
+    frame differences against detected analog time differences in milliseconds,
+    not interpolated movie timestamps. Unmatched transitions can fall between
+    matched anchors; these are intervals between matches, not necessarily every
+    raw transition. Invalid or non-increasing pairs are omitted without bridging.
     No global matplotlib backend is selected or changed.
     """
     rows = []
@@ -47,14 +52,19 @@ def plot_movie_frame_timing(blocks, output_path):
     if anchor_frames.ndim != 1 or anchor_times.shape != anchor_frames.shape:
         raise ValueError("Anchor frame and time arrays must be one-dimensional and equal length")
     finite = np.isfinite(anchor_frames) & np.isfinite(anchor_times)
+    frame_diffs = np.diff(anchor_frames)
+    time_diffs_ms = 1000.0 * np.diff(anchor_times)
+    valid_pairs = (
+        finite[:-1] & finite[1:] & (frame_diffs > 0) & (time_diffs_ms > 0)
+    )
     order = np.argsort(anchor_frames[finite], kind="stable")
     anchor_frames = anchor_frames[finite][order]
     anchor_times = anchor_times[finite][order]
 
     output_path = Path(output_path)
-    figure, axes = plt.subplots(3, 1, figsize=(13, 11), constrained_layout=True)
+    figure, axes = plt.subplots(4, 1, figsize=(13, 15), constrained_layout=True)
     try:
-        interval_axis, residual_axis, coverage_axis = axes
+        interval_axis, residual_axis, coverage_axis, scatter_axis = axes
         has_intervals = False
         for timestamps, _, status in rows:
             supported = np.isfinite(timestamps) & (status != 3)
@@ -143,6 +153,23 @@ def plot_movie_frame_timing(blocks, output_path):
         # Leave room below the spacing curve for the axis-relative coverage rugs.
         coverage_axis.set_ylim(bottom=0)
         coverage_axis.set_ylim(top=coverage_axis.get_ylim()[1] * 1.3)
+
+        if valid_pairs.any():
+            scatter_axis.scatter(
+                frame_diffs[valid_pairs], time_diffs_ms[valid_pairs],
+                s=12, alpha=0.45, color="#1876a3", edgecolors="none",
+                label=f"Consecutive matched transitions (n={np.count_nonzero(valid_pairs)})",
+            )
+        else:
+            scatter_axis.text(
+                0.5, 0.5, "No valid consecutive photodiode matches",
+                ha="center", transform=scatter_axis.transAxes,
+            )
+        scatter_axis.set(
+            title="Photodiode change intervals (between matched transitions; may span unmatched edges)",
+            xlabel="Photodiode display change interval (frames)",
+            ylabel="Analog-detected photodiode interval (ms)",
+        )
         for axis in axes:
             axis.grid(alpha=0.2, linewidth=0.5)
             if axis.get_legend_handles_labels()[0]:

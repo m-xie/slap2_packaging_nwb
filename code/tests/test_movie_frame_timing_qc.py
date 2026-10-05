@@ -58,8 +58,40 @@ class MovieFrameTimingQcTests(unittest.TestCase):
             self.assertEqual(output.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
             self.assertGreater(output.stat().st_size, 1000)
         self.assertEqual(plt.get_fignums(), before)
-        self.assertEqual(len(figures[0].axes), 3)
+        self.assertEqual(len(figures[0].axes), 4)
         return figures[0]
+
+    def test_photodiode_scatter_uses_anchor_differences_in_frames_and_ms(self):
+        blocks = make_blocks(
+            [([100, 105], [900, 950], [0, 1])],
+            [10, 12, 17, 20], [1.0, 1.034, 1.120, 1.169],
+        )
+        axis = self.render(blocks).axes[3]
+        self.assertEqual(len(axis.collections), 1)
+        np.testing.assert_allclose(
+            axis.collections[0].get_offsets(), [[2, 34], [5, 86], [3, 49]],
+        )
+        self.assertIn("(frames)", axis.get_xlabel())
+        self.assertIn("(ms)", axis.get_ylabel())
+        self.assertIn("matched transitions", axis.get_title())
+
+    def test_photodiode_scatter_does_not_bridge_invalid_anchors(self):
+        blocks = make_blocks(
+            [], [0, 2, 4, np.nan, 9, 12, 12, 15, 14, 17],
+            [0, 0.03, np.nan, 0.10, 0.15, 0.20, 0.21, 0.19, 0.24, 0.29],
+        )
+        axis = self.render(blocks).axes[3]
+        np.testing.assert_allclose(
+            axis.collections[0].get_offsets(), [[2, 30], [3, 50], [3, 50]],
+        )
+
+    def test_photodiode_scatter_empty_and_singleton(self):
+        for frames, times in (([], []), ([1], [0.1]), ([1, 1], [0.1, 0.2])):
+            with self.subTest(frames=frames):
+                axis = self.render(make_blocks([], frames, times)).axes[3]
+                self.assertEqual(len(axis.collections), 0)
+                self.assertIn("No valid consecutive photodiode matches",
+                              [text.get_text() for text in axis.texts])
 
     def test_irregular_intervals_do_not_bridge_nan_gaps_or_blocks(self):
         blocks = make_blocks(
