@@ -19,7 +19,7 @@ from qc.random_natural_movies_sync_qc import plot_photodiode_sync
 
 LOGGER_FORMAT = "Random Natural Movies"
 GRATING_ORIENTATIONS = frozenset((0, 45, 90, 135, 180, 225, 270, 315, 359))
-MAX_ENDPOINT_EXTRAPOLATION_FRAMES = 2.0
+MAX_ENDPOINT_EXTRAPOLATION_FRAMES = 10
 # Quality policy, not an accuracy guarantee: reject interpolation across more
 # than three typical *logged* photodiode periods (not matched-anchor periods).
 MAX_INTERPOLATION_GAP_FACTOR = 3.0
@@ -370,7 +370,8 @@ def read_presentation_frames(stimulus_table, logger_path):
 
 
 def _map_boundary_frames(frames, anchor_frames, anchor_times):
-    """Interpolate boundaries, with at most two display ticks of extrapolation.
+    """Interpolate boundaries, with at most MAX_ENDPOINT_EXTRAPOLATION_FRAMES
+    display ticks of extrapolation.
 
     END may follow the final physical photodiode edge by one display tick.
     Never silently clamp it (np.interp's default) or extrapolate an absent tail.
@@ -379,7 +380,10 @@ def _map_boundary_frames(frames, anchor_frames, anchor_times):
     frames = np.asarray(frames, dtype=float)
     distances = np.maximum(anchor_frames[0] - frames, frames - anchor_frames[-1])
     if np.any(distances > MAX_ENDPOINT_EXTRAPOLATION_FRAMES):
-        raise ValueError("Photodiode anchors do not cover playback boundaries (beyond two display frames)")
+        raise ValueError(
+            "Photodiode anchors do not cover playback boundaries "
+            f"(beyond {MAX_ENDPOINT_EXTRAPOLATION_FRAMES} display frames)"
+            )
     times = np.interp(frames, anchor_frames, anchor_times)
     for outside, subset, endpoint in (
         (frames < anchor_frames[0], slice(0, 20), 0),
