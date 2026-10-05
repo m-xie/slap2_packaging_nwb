@@ -79,8 +79,8 @@ class ContinuousHarpStartTests(unittest.TestCase):
         qc_continuous_harp(trimmed)
         clocks = [build_continuous_clock(d['slap2_cycle_clock_signal'], d['slap2_cycle_clock_times'], 10, 2,
                          recording_start=d['recording_start_time']) for d in (data, trimmed)]
-        self.assertEqual(clocks[1]['qc']['detected_pulse_count'], 2)
-        np.testing.assert_allclose(clocks[1]['cycle_starts'], [5.001, 6.001])
+        self.assertEqual(clocks[1]['qc']['detected_pulse_count'], 3)
+        np.testing.assert_allclose(clocks[1]['cycle_starts'], [4.001, 5.001, 6.001])
         self.assertFalse(clocks[1]['qc']['onset_warning'])
         np.testing.assert_allclose(map_continuous_lines([1, 5, 11, 20], clocks[1]),
                                    map_continuous_lines([1, 5, 11, 20], clocks[0]))

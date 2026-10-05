@@ -122,34 +122,34 @@ class ContinuousClockTests(unittest.TestCase):
             map_continuous_lines([1, 11, 16, 21, 26], clock), [-20, -19, -9, 1, 1.5]
         )
 
-    def test_initial_high_after_recording_onset_warns_but_is_not_a_pulse(self):
+    def test_initial_high_after_recording_onset_warns_and_counts_as_first_pulse(self):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            clock = build_continuous_clock([1, 0, 1, 0, 1], [4.0, 4.1, 5.0, 5.1, 6.0], 10, 1, recording_start=-1.0)
+            clock = build_continuous_clock([1, 0, 1, 0, 1], [4.0, 4.1, 5.0, 5.1, 6.0], 10, 2, recording_start=-1.0)
         self.assertFalse(clock["qc"]["onset_warning"])
         self.assertTrue(clock["qc"]["initial_signal_high"])
         self.assertEqual(len(caught), 1)
         self.assertIn("DI3 initially starts high", str(caught[0].message))
-        np.testing.assert_array_equal(clock["cycle_starts"], [5.0, 6.0])
+        np.testing.assert_array_equal(clock["cycle_starts"], [4.0, 5.0, 6.0])
 
-    def test_initial_high_is_ignored_and_first_observed_edge_is_cycle_one(self):
+    def test_initial_high_counts_as_cycle_one(self):
         with self.assertWarnsRegex(
-            RuntimeWarning, "SLAP2 may have started before HARP began recording"
+            RuntimeWarning, "DI3 initially starts high"
         ):
-            clock = build_continuous_clock([1, 1, 0, 1, 0, 1], [-2, -1.7, -1, 0, 1, 2], 10, 1)
-        np.testing.assert_array_equal(clock["cycle_starts"], [0, 2])
-        np.testing.assert_allclose(map_continuous_lines([1, 6, 10], clock), [0, 1, 1.8])
+            clock = build_continuous_clock([1, 0, 1], [-2, -1, 0], 10, 1)
+        np.testing.assert_array_equal(clock["cycle_starts"], [-2, 0])
+        np.testing.assert_allclose(map_continuous_lines([1, 6, 10], clock), [-2, -1, -0.2])
         self.assertEqual(clock["qc"]["detected_pulse_count"], 2)
         self.assertTrue(clock["qc"]["initial_signal_high"])
         self.assertTrue(clock["qc"]["onset_warning"])
-        self.assertFalse(clock["qc"]["first_rising_edge_within_onset_tolerance"])
+        self.assertTrue(clock["qc"]["first_rising_edge_within_onset_tolerance"])
         self.assertEqual(clock["qc"]["recording_start"], -2)
 
-    def test_high_only_single_sample_has_no_measured_rising_edge(self):
+    def test_high_only_single_sample_is_a_valid_first_pulse(self):
         for signal, times in [([True], [5]), ([1, 1, 1], [5, 6, 7]), ([1, 0], [5, 6])]:
             with self.subTest(signal=signal), self.assertWarnsRegex(RuntimeWarning, "DI3 initially starts high"):
-                with self.assertRaisesRegex(ValueError, "No DI3 pulses"):
-                    build_continuous_clock(signal, times, 10, 1)
+                clock = build_continuous_clock(signal, times, 10, 1)
+                np.testing.assert_array_equal(clock["cycle_starts"], [times[0]])
 
     def test_onset_tolerance_includes_exact_boundary(self):
         for edge, expected in [(0.0005, True), (0.001, True), (0.001001, False)]:

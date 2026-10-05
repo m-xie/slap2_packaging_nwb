@@ -49,8 +49,8 @@ def build_continuous_clock(
     ----------
     signal, times : one-dimensional array-like
         Nonempty binary DI3 samples and finite, strictly increasing timestamps.
-        Rising edges use the timestamp of the first high sample. An initially
-        high signal warns but is not counted: a pulse requires a low-to-high edge.
+        The first high sample is treated as the first pulse when the record starts
+        high. An initially high signal warns but is counted rather than ignored.
     lines_per_cycle : positive integer
         Actual constant primary path cycle length from the raw header. Never
         infer it from fluorescence sample counts or their maximum line index.
@@ -106,11 +106,13 @@ def build_continuous_clock(
     initial_high = bool(signal[0] == 1)
     if initial_high:
         warnings.warn(
-            "DI3 initially starts high; ignoring the initial high state because "
-            "no low-to-high transition was observed.",
+            "DI3 initially starts high; counting the initial high state as the "
+            "first pulse rather than ignoring it.",
             RuntimeWarning, stacklevel=2,
         )
     cycle_starts = times[rising_idxs].copy()
+    if initial_high:
+        cycle_starts = np.insert(cycle_starts, 0, times[0])
     pulse_count = int(cycle_starts.size)
     if not pulse_count:
         raise ValueError("No DI3 pulses detected")
@@ -120,7 +122,7 @@ def build_continuous_clock(
             "at most one extra final boundary pulse is allowed"
         )
 
-    first_rising_edge = float(times[rising_idxs[0]]) if rising_idxs.size else None
+    first_rising_edge = float(cycle_starts[0]) if cycle_starts.size else None
     early_edge = bool(
         first_rising_edge is not None
         and first_rising_edge <= recording_start + _ONSET_TOLERANCE_SECONDS
@@ -135,9 +137,9 @@ def build_continuous_clock(
     if onset_warning:
         warnings.warn(
             "SLAP2 may have started before HARP began recording: DI3 is "
-            "high at recording onset or its first rising edge is within 0.001 seconds "
-            "of recording onset. Only observed low-to-high pulses are counted; "
-            "line indices are unchanged.",
+            "high at recording onset or its first pulse start is within 0.001 seconds "
+            "of recording onset. Only observed pulse starts are counted; line "
+            "indices are unchanged.",
             RuntimeWarning,
             stacklevel=2,
         )
