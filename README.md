@@ -14,12 +14,27 @@ are packaged separately from extracted sources:
 - `processing/ophys/SomaFluorescence_DMD1` contains `DMD1_soma_F_green` and
 	`DMD1_soma_F_red`, plus `DMD1_soma_Fsvd_green` and `DMD1_soma_Fsvd_red` when
 	`Fsvd` is available. Only recorded channels are written; DMD names vary by plane.
+- When `Fsvd` is available, the same container also stores `DMD1_soma_F0_green`
+	and `DMD1_soma_dFF_green` (and corresponding red-channel series). Baselines
+	are calculated by importing `compute_f0` from `scbc.utils.signal`, pinned to
+	SCBC commit `0307c3fa7e3cc2a0611e0f796c0c4f9d675db76c` in the environment.
+	The 1-second denoising and 4-second baseline windows are converted to samples
+	using the median finite, positive, within-trial HARP sample interval.
+	`dFF = (Fsvd - F0) / F0` is dimensionless; zero/non-finite baselines and
+	non-finite `Fsvd` values yield NaN dF/F. F0 retains fluorescence units.
 
-These are the original `user_rois/F` and `user_rois/Fsvd` values, not source
-`F0` or derived dF/F. They retain fluorescence NaNs and share the plane's HARP
+The original `user_rois/F` and `user_rois/Fsvd` values remain unchanged.
+Baseline estimation runs independently within each retained acquisition trial;
+continuous source-extraction chunks are treated as one acquisition. Very short
+traces are edge-padded when needed by SCBC's decimated smoother, then trimmed
+back to their original length. Computation precedes timestamp-based removal,
+so unsupported timestamps do not compress the baseline input time axis.
+All soma series share their own ROI table and the plane's HARP
 timestamps, leading/trailing trial exclusions, and removal of samples with
-non-finite timestamps. Existing source traces and QC selection are unchanged.
-Absent user ROIs or labels other than `soma` add no soma output.
+non-finite timestamps. Existing source traces remain unchanged. The new soma
+F0/dFF names are recognized by the existing baseline/dF/F QC selectors.
+Absent user ROIs or labels other than `soma` add no soma output; absent `Fsvd`
+leaves only the original soma F series, without inventing a baseline.
 
 ## Random Natural Movies
 

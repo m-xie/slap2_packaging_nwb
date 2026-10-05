@@ -1636,6 +1636,7 @@ def add_ophys_to_nwb(
         soma_packaging.add_soma_fluorescence(
             experiment_summary[plane], fluorescence, timestamps, dmd_name,
             imaging_plane, image_segmentation, ophys_mod, get_pixel_mask,
+            trial_num_frames=plane_qc['trial_num_frames'],
         )
         roi_table = add_image_segmentation(experiment_summary, imaging_plane, dmd_name, image_segmentation, plane_key=plane)
         add_fluorescence(fluorescence, timestamps, dmd_name, roi_table, ophys_mod)

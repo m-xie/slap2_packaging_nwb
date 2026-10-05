@@ -24,6 +24,7 @@ RUN --mount=type=secret,id=git-access-token \
     pynwb==4.2.0 \
     pyyaml==6.0.3 \
     tables==3.10.1 \
+    'scbc @ git+https://github.com/AllenNeuralDynamics/ophys-SCBC-analysis.git@0307c3fa7e3cc2a0611e0f796c0c4f9d675db76c#subdirectory=python/scbc' \
     -e git+https://github.com/m-xie/SLAP2_Utils.git@d5a7cbc1476c52dd57d7530935776ca9b7bc26d5#egg=SLAP2_UTILS \
     -e git+https://github.com/AllenNeuralDynamics/analysis-pipeline-utils.git@3c5c66fa21c4ed49a17b47f6b2b23b49ecde7564#egg=analysis-pipeline-utils \
     -e git+https://github.com/AllenInstitute/openscope_upload.git@d54ae99620cb81f92cffa75ecf2fe66e9ee2e3b2#egg=openscope-upload

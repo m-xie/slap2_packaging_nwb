@@ -18,6 +18,88 @@ import slap2_soma_packaging as soma
 from qc.slap2_dff_qc import _is_dff_series, _is_raw_fluorescence_series
 
 
+class SomaBaselineTests(unittest.TestCase):
+    def test_matches_imported_scbc_on_fsvd_for_every_channel_and_roi(self):
+        timestamps = np.arange(128) / 8.0
+        values = np.random.default_rng(17).uniform(10, 20, (128, 2, 3))
+        original = values.copy()
+        expected = soma.compute_f0(values, denoise_window=8, hull_window=32)
+        f0, dff = soma.compute_soma_dff(values, timestamps)
+        np.testing.assert_allclose(f0, expected)
+        np.testing.assert_allclose(dff, (values - expected) / expected)
+        np.testing.assert_array_equal(values, original)
+
+    def test_trials_are_independent_and_gaps_do_not_set_sample_rate(self):
+        values = np.concatenate((np.full((32, 2, 1), 10.0), np.full((32, 2, 1), 100.0)))
+        timestamps = np.r_[np.arange(32) / 8.0, 100 + np.arange(32) / 8.0]
+        with patch.object(soma, "compute_f0", wraps=soma.compute_f0) as compute:
+            f0, dff = soma.compute_soma_dff(values, timestamps, trial_num_frames=[32, 32])
+        self.assertEqual(compute.call_count, 2)
+        for call, expected in zip(compute.call_args_list, (values[:32], values[32:])):
+            np.testing.assert_array_equal(call.args[0], expected)
+            self.assertEqual(call.kwargs, dict(denoise_window=8, hull_window=32))
+        np.testing.assert_allclose(f0, values)
+        np.testing.assert_allclose(dff, 0)
+
+    def test_missing_timestamps_do_not_compress_baseline_input(self):
+        values = np.arange(128, dtype=float).reshape(128, 1, 1) + 10
+        timestamps = np.arange(128) / 8.0
+        timestamps[32:64] = np.nan
+        with patch.object(soma, "compute_f0", wraps=soma.compute_f0) as compute:
+            f0, _ = soma.compute_soma_dff(values, timestamps)
+        np.testing.assert_array_equal(compute.call_args.args[0], values)
+        self.assertEqual(f0.shape, values.shape)
+        self.assertEqual(compute.call_args.kwargs, dict(denoise_window=8, hull_window=32))
+
+    def test_zero_baselines_and_nonfinite_fsvd_have_nan_dff(self):
+        values = np.full((128, 2, 2), 10.0)
+        values[:, 0, 0] = 0
+        values[:, 0, 1] = np.nan
+        values[40, 1, 0] = np.nan
+        values[60, 1, 1] = np.inf
+        f0, dff = soma.compute_soma_dff(values, np.arange(128) / 8.0)
+        np.testing.assert_array_equal(f0[:, 0, 0], 0)
+        self.assertTrue(np.isnan(f0[:, 0, 1]).all())
+        self.assertTrue(np.isnan(dff[:, 0, :]).all())
+        self.assertTrue(np.isnan(dff[40, 1, 0]))
+        self.assertTrue(np.isnan(dff[60, 1, 1]))
+        self.assertFalse(np.isinf(dff).any())
+        self.assertTrue(np.isinf(values[60, 1, 1]))  # Input is not modified.
+
+    def test_short_traces_use_library_with_safe_padding(self):
+        for size in (2, 3, 4, 5, 6, 32):
+            with self.subTest(size=size):
+                values = np.full((size, 1, 1), 10.0)
+                f0, dff = soma.compute_soma_dff(values, np.arange(size) / 200.0)
+                self.assertEqual(f0.shape, values.shape)
+                np.testing.assert_allclose(f0, values)
+                np.testing.assert_allclose(dff, 0)
+
+    def test_empty_or_untimed_data_does_not_call_estimator(self):
+        for size in (0, 10):
+            with self.subTest(size=size), patch.object(soma, "compute_f0") as compute:
+                f0, dff = soma.compute_soma_dff(
+                    np.ones((size, 1, 1)), np.full(size, np.nan),
+                )
+                compute.assert_not_called()
+                self.assertTrue(np.isnan(f0).all())
+                self.assertTrue(np.isnan(dff).all())
+
+    def test_rejects_invalid_windows_counts_and_sample_clock(self):
+        values = np.ones((8, 1, 1))
+        timestamps = np.arange(8, dtype=float)
+        for kwargs in (
+            dict(denoise_window_s=0), dict(baseline_window_s=np.nan),
+            dict(trial_num_frames=[7]), dict(trial_num_frames=[4.5, 3.5]),
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                soma.compute_soma_dff(values, timestamps, **kwargs)
+        with self.assertRaisesRegex(ValueError, "sample rate"):
+            soma.compute_soma_dff(values, np.zeros(8))
+        with self.assertRaisesRegex(ValueError, "match timestamps"):
+            soma.compute_soma_dff(values, timestamps[:-1])
+
+
 class SomaPackagingTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
@@ -131,10 +213,12 @@ class SomaPackagingTests(unittest.TestCase):
         self.assertEqual(list(table["z_min"].data), [0, 1])
         np.testing.assert_array_equal(table["pixel_mask"][0], [(2, 1, 1.0)])
         container = ophys["SomaFluorescence_DMD1"]
-        self.assertEqual(len(container.roi_response_series), 4)
+        self.assertEqual(len(container.roi_response_series), 8)
+        f0, dff = soma.compute_soma_dff(traces["soma_Fsvd"], timestamps)
+        expected = dict(traces, soma_F0=f0, soma_dFF=dff)
         for name in container.roi_response_series:
-            self.assertFalse(_is_dff_series(name))
-            self.assertFalse(_is_raw_fluorescence_series(name))
+            self.assertEqual(_is_dff_series(name), "_dFF_" in name)
+            self.assertEqual(_is_raw_fluorescence_series(name), "_F0_" in name)
         for io_class, suffix in ((pynwb.NWBHDF5IO, ".nwb"), (hdmf_zarr.NWBZarrIO, ".nwb.zarr")):
             with self.subTest(format=suffix):
                 path = self.root / f"test{suffix}"
@@ -144,9 +228,10 @@ class SomaPackagingTests(unittest.TestCase):
                     read = io.read()
                     saved = read.processing["ophys"]["SomaFluorescence_DMD1"]
                     for name, series in saved.roi_response_series.items():
-                        kind = "Fsvd" if "Fsvd" in name else "F"
+                        kind = name.split("_")[-2]
                         channel = 1 if name.endswith("red") else 0
-                        np.testing.assert_array_equal(series.data[:], traces[f"soma_{kind}"][:2, channel, :])
+                        np.testing.assert_array_equal(series.data[:], expected[f"soma_{kind}"][:2, channel, :])
+                        self.assertEqual(series.unit, "dimensionless" if kind == "dFF" else "a.u.")
                         np.testing.assert_array_equal(series.timestamps[:], [0.0, 1.0])
                         self.assertEqual(series.rois.table.name, "SomaPlaneSegmentation_DMD1")
                         np.testing.assert_array_equal(series.rois.data[:], [0, 1])

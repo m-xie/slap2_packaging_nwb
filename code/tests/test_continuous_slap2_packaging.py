@@ -304,11 +304,25 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
         for key, offset in (("F", 0), ("Fsvd", 100)):
             group.create_dataset(key, data=values + offset)
         self.path_metadata["Path1"]["total_lines"] = 8
-        with warnings.catch_warnings():
+        with warnings.catch_warnings(), patch.object(
+            packaging.soma_packaging, "compute_soma_dff",
+            wraps=packaging.soma_packaging.compute_soma_dff,
+        ) as compute_soma:
             warnings.simplefilter("ignore", RuntimeWarning)
             self.package()
+        compute_soma.assert_called_once()
+        np.testing.assert_array_equal(compute_soma.call_args.kwargs["trial_num_frames"], [4])
         ophys = self.nwb.processing["ophys"]
         container = ophys["SomaFluorescence_DMD1"]
+        f0, dff = packaging.soma_packaging.compute_soma_dff(
+            values + 100, np.array([0.0, 0.5, 2.0, np.nan]), trial_num_frames=[4],
+        )
+        for key, expected in (("F0", f0), ("dFF", dff)):
+            for channel, color in enumerate(("green", "red")):
+                series = container.roi_response_series[f"DMD1_soma_{key}_{color}"]
+                np.testing.assert_allclose(series.data, expected[:3, channel, :])
+                np.testing.assert_allclose(series.timestamps, [0.0, 0.5, 2.0])
+                self.assertEqual(series.rois.table.name, "SomaPlaneSegmentation_DMD1")
         for key, offset in (("F", 0), ("Fsvd", 100)):
             for channel, color in enumerate(("green", "red")):
                 series = container.roi_response_series[f"DMD1_soma_{key}_{color}"]
