@@ -3,6 +3,7 @@
 /results/
 /scratch/
 metadata/metadata.yml
+*/secrets.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
