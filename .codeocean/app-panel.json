@@ -60,7 +60,7 @@
 			"description": "Directory in which to look for source extracted and motion corrected files",
 			"type": "text",
 			"value_type": "string",
-			"default_value": "slap2_processed"
+			"default_value": "slap2_source-extracted"
 		},
 		{
 			"id": "odA1UqkM9gdwF8aW",
