@@ -18,7 +18,7 @@
 			"description": "Visual stimulus logger format used during the session.",
 			"type": "list",
 			"value_type": "string",
-			"default_value": "Legacy Drifting Gratings",
+			"default_value": "Random Natural Movies",
 			"extra_data": [
 				"OpenScope P3",
 				"Random Natural Movies",
@@ -77,7 +77,7 @@
 			"help_text": "Substring used to identify the stim table csv",
 			"type": "text",
 			"value_type": "string",
-			"default_value": "orientations_orientations0"
+			"default_value": "stim_table"
 		}
 	]
 }
