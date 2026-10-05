@@ -32,10 +32,12 @@ import warnings
 import matplotlib.pyplot as plt
 import os
 from importlib.metadata import version as package_version
-
+from analysis_pipeline_utils.metadata import get_codeocean_process_metadata
 
 data_folder = Path("../data")
 results_folder = Path("../results")
+
+os.environ["CODEOCEAN_DOMAIN"] = "codeocean.allenneuraldynamics.org"
 
 
 def ensure_was_generated_by(nwbfile):
@@ -130,6 +132,15 @@ def write_data_process(
     parameters,
 ):
     """Write provenance for SLAP2 synchronization and NWB packaging."""
+    process = get_codeocean_process_metadata(
+        capsule_id=os.getenv("CO_CAPSULE_ID"),
+        computation_id=os.getenv("CO_COMPUTATION_ID")
+    )
+    output_path = Path(output_dir) / "nwb-packaging_data_process.json"
+    with open(output_path, "w") as f:
+        json.dump(json.loads(process.model_dump_json()), f, indent=4)
+    return
+
     code_version = os.getenv("VERSION", "")
     code_url = "https://github.com/AllenNeuralDynamics/aind-slap2-nwb-packaging"
     experimenters = ["AIND Scientific Computing"]
@@ -210,6 +221,12 @@ def write_data_process(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--codeocean_email",
+        type=str,
+        default=os.getenv("CODEOCEAN_EMAIL", ""),
+        help="Email used for Code Ocean processing metadata; defaults to CODEOCEAN_EMAIL.",
+    )
+    parser.add_argument(
         "--logger_format",
         choices=["OpenScope P3", "Random Natural Movies", "Legacy Drifting Gratings"],
         default="Legacy Drifting Gratings",
@@ -228,6 +245,8 @@ def main():
                         help="Onset delay in seconds for RF response windows (default: 0.2)")
     parser.add_argument("--qc_folder_name", type=str, default="qc")
     args = parser.parse_args()
+    if args.codeocean_email.strip():
+        os.environ["CODEOCEAN_EMAIL"] = args.codeocean_email.strip()
     logger_format = args.logger_format
     use_input_nwb = args.use_input_nwb.lower() in ('t', 'true')
     allow_skip_running = args.allow_skip_running.lower() in ('t', 'true')
