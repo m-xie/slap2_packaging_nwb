@@ -2,11 +2,11 @@
 	"version": 1,
 	"attached_datasets": [
 		{
-			"id": "53c60a23-f796-4929-a388-eec7fa7cdaef",
+			"id": "183b9476-d482-4f7e-8342-bf401f892ddd",
 			"mount": "slap2_source-extracted"
 		},
 		{
-			"id": "eda6f8af-a6c9-4669-88ab-fcf8d6620123",
+			"id": "2cf206f0-7a68-47ac-816b-fb214a66b924",
 			"mount": "slap2_session"
 		}
 	]
