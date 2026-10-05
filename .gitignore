@@ -4,6 +4,7 @@
 /scratch/
 metadata/metadata.yml
 */secrets.json
+*/datasets.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
