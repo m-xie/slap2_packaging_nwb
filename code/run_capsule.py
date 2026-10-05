@@ -22,7 +22,7 @@ from qc import slap2_dff_qc
 from qc import slap2_receptive_fields_qc as slap2_rf_qc
 from qc import stim_tuning_qc
 from qc import zebra_movie_qc
-from qc.movie_frame_timing_qc import plot_movie_frame_timing
+from qc.random_natural_movies_sync_qc import plot_di3_sync
 import json
 import pandas as pd
 import argparse
@@ -273,7 +273,7 @@ def main():
             stimulus_timing_metadata = add_stim_table(
                 nwbfile, stim_table_csv, log_csv, harp_data, logger_format,
                 acquisition_json=acquisition_json,
-                movie_frame_qc_path=qc_folder / 'syncing' / 'movie_frame_timing.png',
+                photodiode_qc_path=qc_folder / 'syncing' / 'photodiode_sync.png',
             )
             stimulus_end_time = datetime.now().astimezone()
             ophys_start_time = datetime.now().astimezone()
@@ -545,11 +545,11 @@ def read_stim_csv(filepath):
     return df
 
 
-def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_format=None, acquisition_json=None, movie_frame_qc_path=None):
+def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_format=None, acquisition_json=None, photodiode_qc_path=None):
     if logger_format == random_natural_movies.LOGGER_FORMAT:
         return add_stim_table_movies(
             nwbfile, orientations_table, log_csv, harp_data, acquisition_json,
-            movie_frame_qc_path=movie_frame_qc_path,
+            photodiode_qc_path=photodiode_qc_path,
         )
     stimulus_df = read_stim_csv(orientations_table)
 
@@ -617,10 +617,11 @@ def add_stim_table(nwbfile, orientations_table, log_csv, harp_data, logger_forma
 
     return timing_metadata
 
-def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisition_json=None, movie_frame_qc_path=None):
+def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisition_json=None, photodiode_qc_path=None):
     """Preserve observed source table rows and their individual grating trials."""
     blocks, gratings, timing_metadata = random_natural_movies.synchronize_presentations(
         pd.read_csv(stim_table_csv), log_csv, harp_data,
+        photodiode_qc_path=photodiode_qc_path,
     )
     gratings, grating_descriptions = random_natural_movies.add_grating_parameters(
         gratings, acquisition_json,
@@ -685,8 +686,6 @@ def add_stim_table_movies(nwbfile, stim_table_csv, log_csv, harp_data, acquisiti
             )
         nwbfile.add_time_intervals(table)
         print(f"Added intervals table '{name}' with {len(frame_table)} rows")
-    if movie_frame_qc_path is not None:
-        plot_movie_frame_timing(blocks, movie_frame_qc_path)
     print("stimulus timing:", timing_metadata)
     return timing_metadata
 
@@ -1174,18 +1173,6 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
             'continuous_clock_qc': continuous_clock['qc'],
             'unsupported_sample_count': unsupported,
         }
-        if qc_folder is not None:
-            qc_folder = Path(qc_folder)
-            qc_folder.mkdir(parents=True, exist_ok=True)
-            summary = {
-                'dmd': dmd_name, 'path_metadata': path_metadata,
-                'clock': continuous_clock['qc'], 'sample_count': len(timestamps),
-                'unsupported_sample_count': unsupported,
-                'stored_sample_count': len(timestamps) - unsupported,
-                'processing_chunk_num_frames': processing_chunk_num_frames.tolist(),
-            }
-            with (qc_folder / f'{dmd_name}_continuous_sync.json').open('w') as stream:
-                json.dump(summary, stream, indent=2)
         return fluorescence, timestamps, None, plane_qc
 
     print('using slap2 acquisition:', filtered['acquisition_prefix'])
@@ -1581,6 +1568,13 @@ def add_ophys_to_nwb(
         acquisition_resolution, continuous_clock, path_metadata_by_plane = prepare_continuous_slap2(
             plane_inputs, harp_data,
         )
+        if qc_folder is not None:
+            plot_di3_sync(
+                continuous_clock,
+                {name: path_metadata_by_plane[plane]['total_cycles']
+                 for plane, name, *_ in plane_inputs},
+                Path(qc_folder) / 'syncing' / 'slap2_di3_sync.png',
+            )
     else:
         acquisition_resolution = resolve_slap2_acquisition(
             all_dat_paths,

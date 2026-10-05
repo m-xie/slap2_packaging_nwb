@@ -2,7 +2,7 @@
 
 Only raw-header I/O and unrelated image/ROI construction are mocked. The HDF5
 summary, acquisition filtering, sequential clock, line mapping, fluorescence
-containers, and QC JSON are real. Empty raw/.meta placeholders deliberately
+containers, and QC PNG are real. Empty raw/.meta placeholders deliberately
 cannot supply an effective lines-per-cycle value or any timestamps.
 
 The integration uses the installed PyNWB API without compatibility shims.
@@ -222,15 +222,21 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
             / (self.traces[plane]["F0"][valid, 0, :] + 1e-6),
         )
 
-    def assert_qc_json(self, name):
-        path = self.qc / "syncing" / f"{name}_continuous_sync.json"
-
-        def reject_constant(value):
-            self.fail(f"Non-finite JSON constant: {value}")
-
-        report = json.loads(path.read_text(), parse_constant=reject_constant)
-        # Also reject overflowed JSON numbers (e.g. 1e999), not just NaN tokens.
+    def assert_qc_metadata(self, name):
+        # Detailed diagnostics remain in memory, not separate syncing files.
+        qc = self.synced[name][3]
+        report = {
+            "dmd": name, "path_metadata": qc["path_metadata"],
+            "clock": qc["continuous_clock_qc"], "sample_count": len(qc["timestamps"]),
+            "unsupported_sample_count": qc["unsupported_sample_count"],
+            "stored_sample_count": int(np.isfinite(qc["timestamps"]).sum()),
+            "processing_chunk_num_frames": qc["processing_chunk_num_frames"].tolist(),
+        }
         json.dumps(report, allow_nan=False)
+        self.assertEqual({path.name for path in (self.qc / "syncing").iterdir()},
+                         {"slap2_di3_sync.png"})
+        self.assertEqual((self.qc / "syncing" / "slap2_di3_sync.png").read_bytes()[:8],
+                         b"\x89PNG\r\n\x1a\n")
         self.assertEqual(report["dmd"], name)
         self.assertEqual(report["sample_count"], 4)
         plane = f"Path{name[-1]}"
@@ -281,7 +287,7 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
         self.assertEqual([call.kwargs["recorded_line_count"]
                           for call in self.map_lines.call_args_list], [12, 14])
         for name in ("DMD1", "DMD2"):
-            report = self.assert_qc_json(name)
+            report = self.assert_qc_metadata(name)
             self.assertEqual(report["unsupported_sample_count"], 0)
             self.assertEqual(report["clock"]["extra_final_pulse_count"], 1)
             self.assertEqual(report["clock"]["last_cycle_policy"], "measured_end")
@@ -364,7 +370,7 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
         with self.assertWarnsRegex(RuntimeWarning, "DI3 initially starts high"):
             self.package()
         self.assert_packaged("DMD1", [0.0, 0.5, 2.0, 3.25])
-        self.assertEqual(self.assert_qc_json("DMD1")["clock"]["detected_pulse_count"], 4)
+        self.assertEqual(self.assert_qc_metadata("DMD1")["clock"]["detected_pulse_count"], 4)
 
     def test_sourceless_primary_still_controls_secondary_clock_and_raw_limit(self):
         del self.summary["Path1"]["sources"]
@@ -378,7 +384,7 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
         self.assertEqual(self.imaging.call_count, 2)
         self.assertEqual(self.images.call_count, 2)
         self.assertEqual(self.rois.call_count, 1)
-        self.assertEqual(self.assert_qc_json("DMD2")["clock"]["primary_dmd"], "DMD1")
+        self.assertEqual(self.assert_qc_metadata("DMD2")["clock"]["primary_dmd"], "DMD1")
         self.assertFalse((self.qc / "syncing" / "DMD1_continuous_sync.json").exists())
 
     def test_single_start_without_end_is_accepted(self):
@@ -397,7 +403,7 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
         self.assert_packaged("DMD1", [0.0, 0.5, 2.0, 3.625])
         self.assert_packaged("DMD2", [0.0, 1.0, 2.5, np.nan])
         for name, unsupported in (("DMD1", 0), ("DMD2", 1)):
-            report = self.assert_qc_json(name)
+            report = self.assert_qc_metadata(name)
             self.assertEqual(report["unsupported_sample_count"], unsupported)
             self.assertEqual(report["stored_sample_count"], 4 - unsupported)
             self.assertEqual(report["clock"]["estimated_mean_period_seconds"], 1.5)
@@ -426,7 +432,7 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
             self.package()
         self.assertEqual(self.map_lines.call_args.kwargs["recorded_line_count"], 12)
         self.assert_packaged("DMD2", [0.0, 1.0, 2.5, np.nan])
-        self.assertEqual(self.assert_qc_json("DMD2")["stored_sample_count"], 3)
+        self.assertEqual(self.assert_qc_metadata("DMD2")["stored_sample_count"], 3)
         self.assert_filtered_roundtrip("DMD2", [0.0, 1.0, 2.5], np.arange(3))
 
     def test_primary_out_of_range_samples_are_removed_without_changing_secondary_clock(self):
@@ -509,7 +515,7 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
         del self.harp["recording_start_time"]
         self.package()
         self.assertEqual(self.build_clock.call_args.kwargs["recording_start"], -2.0)
-        report = self.assert_qc_json("DMD1")
+        report = self.assert_qc_metadata("DMD1")
         self.assertEqual(report["clock"]["first_pulse_timestamp"], -0.5)
         self.assertFalse(report["clock"]["onset_warning"])
         self.assert_packaged("DMD1", [0.0, 0.5, 2.0, 3.25])
@@ -544,6 +550,31 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
     def test_main_packages_continuous_acquisition_without_end(self):
         self.check_main_continuous_packaging(has_end=False)
         self.assertEqual(packaging.find_slap2_trial_index(100, np.array([3.0]), np.array([])), 0)
+
+    def test_movie_and_ophys_packaging_emit_only_two_sync_pngs(self):
+        from tests.test_random_natural_movies import example_session
+
+        table, logger = example_session(("movie", "movie"))
+        table_path, logger_path = self.root / "stim.csv", self.root / "logger.csv"
+        table.to_csv(table_path, index=False)
+        logger.to_csv(logger_path, index=False)
+        frames = np.arange(logger.Frame.max() + 1, dtype=float)
+        times = 0.5 + frames / 60
+        alignment = packaging.stimulus_sync.AlignmentQC(
+            str(logger_path), len(frames), len(frames), len(frames), 60, 0, 0, 0,
+        )
+        with patch.object(packaging.stimulus_sync, "align_logger_frames_to_harp",
+                          return_value=(frames, times, alignment)), patch.object(
+            packaging.stimulus_sync, "extract_harp_photodiode_transitions",
+            return_value=(times[::3], np.zeros(len(times[::3])), 0.5),
+        ), redirect_stdout(StringIO()):
+            packaging.add_stim_table(
+                self.nwb, table_path, logger_path, self.harp, "Random Natural Movies",
+                photodiode_qc_path=self.qc / "syncing" / "photodiode_sync.png",
+            )
+            self.package()
+        self.assertEqual({path.name for path in (self.qc / "syncing").iterdir()},
+                         {"photodiode_sync.png", "slap2_di3_sync.png"})
 
     def check_main_continuous_packaging(self, has_end):
         # main clears its results directory: ALWAYS replace it with a temporary one.
@@ -619,9 +650,11 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
             np.testing.assert_array_equal(self.harp[key], original)
         self.assert_packaged("DMD1", [4.0, 4.5, 6.0, 7.25])
         self.assert_packaged("DMD2", [4.0, 5.0, 6.5, 7.5])
-        self.assertTrue((results / "qc" / "syncing" / "DMD1_continuous_sync.json").is_file())
-        with (results / "qc" / "syncing" / "DMD1_continuous_sync.json").open() as stream:
-            self.assertNotIn('startup_handling', json.load(stream)['clock'])
+        self.assertEqual({path.name for path in (results / "qc" / "syncing").iterdir()},
+                         {"slap2_di3_sync.png"})
+        self.assertNotIn('startup_handling', self.synced["DMD1"][3]['continuous_clock_qc'])
+        self.assertEqual(consumers["add_stim_table"].call_args.kwargs["photodiode_qc_path"],
+                         results / "qc" / "syncing" / "photodiode_sync.png")
 
 
 class LegacyPrimaryPackagingTests(unittest.TestCase):
@@ -658,8 +691,14 @@ class LegacyPrimaryPackagingTests(unittest.TestCase):
             secondary = stack.enter_context(patch.object(packaging.slap2_sync, "get_slap2_secondary_plane_timestamps",
                                                         wraps=packaging.slap2_sync.get_slap2_secondary_plane_timestamps))
             sync = stack.enter_context(patch.object(packaging, "sync_slap2_fluorescence", wraps=packaging.sync_slap2_fluorescence))
+            legacy_plot = stack.enter_context(patch.object(packaging.slap2_sync, "plot_slap2_sync_qc"))
+            movie_plot = stack.enter_context(patch.object(packaging, "plot_di3_sync"))
             with self.assertWarnsRegex(UserWarning, "DMD1 is missing sources"), redirect_stdout(StringIO()):
-                packaging.add_ophys_to_nwb(summary, nwb, {"instrument_id": "test", "notes": ""}, {}, harp, root)
+                packaging.add_ophys_to_nwb(summary, nwb, {"instrument_id": "test", "notes": ""}, {}, harp, root,
+                                          qc_folder=root / "qc")
+            legacy_plot.assert_called_once()
+            self.assertEqual(legacy_plot.call_args.kwargs["qc_folder"], root / "qc" / "syncing")
+            movie_plot.assert_not_called()
             self.assertEqual([call.args[0] for call in sync.call_args_list], ["DMD1", "DMD2"])
             primary.assert_called_once()
             secondary.assert_called_once()

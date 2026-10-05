@@ -120,11 +120,32 @@ plot, but are **not saved in NWB**. The per-frame arrays remain in
 external processing provenance under `stimulus_timing.movie_frame_timing`;
 the original HARP clock offset is recorded when available.
 
-The movie timing QC figure includes a scatter plot of consecutive matched
-photodiode changes: display-frame differences on the x-axis and analog-detected
-time differences in milliseconds on the y-axis. These use matched photodiode
-anchors, not interpolated movie timestamps. Intervals may span unmatched
-transitions; invalid or non-increasing pairs are omitted without bridging them.
+For Random Natural Movies, the synchronization QC folder contains only two PNGs:
+
+- **Photodiode synchronization:** take N analog edges within 2 s of the first
+	or last detected analog edge and overlay the first or last N BonVision edges,
+	respectively. Blue logger-frame edges use a fixed nominal **60 Hz** conversion;
+	green dashed Harp edges retain their measured times. Only a horizontal shift
+	is applied: align the first edge pair in the first panel and the last pair in
+	the last panel. No fitted rate, matched anchors, or stretching is used. Display
+	limits expand if necessary to keep all selected edges visible without changing
+	the conversion. Short recordings have overlapping windows; insufficient logger
+	edges are explicitly noted. Total analog and BonVision edge counts remain in
+	the title. Analog inputs use the synchronization acquisition cutoff, excluding
+	the pre-stimulus baseline. This ordinal comparison is for visualization only,
+	not the mapping used for saved stimulus timestamps.
+	For Random Natural Movies, the first logged high photodiode state always
+	counts as a rising edge at its own frame, even if it is not the `STARTSLAP`
+	frame. An initial low state and repeated states do not add edges; the final
+	state adds an edge only if it changes from the preceding state.
+- **SLAP2 / DI3 synchronization:** total raw SLAP2 cycles per DMD, the total
+	detected DI3 pulse count, and a histogram of consecutive DI3 intervals in ms.
+	DI3 is compared with DMD1 (not the sum of both DMDs). All detected pulses,
+	including an extra final boundary, are included; estimated boundaries are not.
+	Counts are also printed to the console.
+
+The previous movie timing figure and per-DMD continuous sync JSON files are no
+longer emitted for this path. Legacy synchronization QC outputs are unchanged.
 
 **Precision caveat:** timestamps are photodiode-aligned onset estimates, not
 independent optical measurements of every movie frame. Logger/render ordering,

@@ -44,8 +44,9 @@ def extract_logger_events(logger_path, *, stimulus_frames=None, initial_low_base
 
     Format adapters may supply validated stimulus frames; by default the
     existing StimStart-* parser and its validation are used unchanged.
-    With initial_low_baseline=True, only a high first state at STARTSLAP is
-    inserted as an initial edge. This assumes the pre-stimulus patch was low;
+    With initial_low_baseline=True, a high first state is always inserted as a
+    rising edge at its logged frame, regardless of the STARTSLAP frame. A low
+    first state is not an edge. This assumes the pre-logging patch was low;
     later state changes (including observed high-to-low changes) are unchanged.
     """
     logger_path = Path(logger_path)
@@ -88,11 +89,11 @@ def extract_logger_events(logger_path, *, stimulus_frames=None, initial_low_base
     transition_indices = np.flatnonzero(states[1:] != states[:-1]) + 1
     photodiode_frames = photodiode_rows["Frame"].to_numpy(dtype=int)
     if (
-        len(photodiode_frames) and photodiode_frames[0] == reference_frame
-        and (not initial_low_baseline or states[0])
+        len(photodiode_frames)
+        and (states[0] if initial_low_baseline else photodiode_frames[0] == reference_frame)
     ):
         # Preserve the historical first-state anchor by default. For a known
-        # low baseline, a first low state is not a physical transition.
+        # low baseline, count the first high even when STARTSLAP is elsewhere.
         transition_indices = np.insert(transition_indices, 0, 0)
     if len(transition_indices) < 3:
         raise ValueError(

@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 import stimulus_sync
+from qc.random_natural_movies_sync_qc import plot_photodiode_sync
 
 
 LOGGER_FORMAT = "Random Natural Movies"
@@ -436,7 +437,7 @@ def map_movie_frames(frames, anchor_frames, anchor_times, maximum_gap_frames):
     return times, status
 
 
-def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_interpolation_gap_frames=None):
+def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_interpolation_gap_frames=None, *, photodiode_qc_path=None):
     """Align all playback boundaries once; DO2 cannot replace missing offsets."""
     blocks, gratings = read_presentation_frames(stimulus_table, logger_path)
     recovery_warnings = list(blocks.attrs["recovery_warnings"])
@@ -450,6 +451,8 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_in
         logger_data, harp_times, harp_states,
     )
     anchor_frames, anchor_times = _validate_frame_anchors(anchor_frames, anchor_times)
+    if photodiode_qc_path is not None:
+        plot_photodiode_sync(logger_data, harp_times, photodiode_qc_path)
     logged_frame_count = int(blocks["movie_frame_count"].sum())
     if maximum_interpolation_gap_frames is None:
         maximum_interpolation_gap_frames = MAX_INTERPOLATION_GAP_FACTOR * float(

@@ -96,16 +96,26 @@ class StimulusSyncTests(unittest.TestCase):
 
     def test_low_baseline_only_inserts_initial_high_state(self):
         for initial_high in (False, True):
-            with self.subTest(initial_high=initial_high):
-                rows = [(10, 1.0, "STARTSLAP"), (10, 1.0, "StimStart-one")]
-                states = [initial_high, not initial_high, initial_high, not initial_high]
-                rows.extend((10 + i, 1 + i / 60, f"Photodiode-{int(state)}") for i, state in enumerate(states))
-                with tempfile.TemporaryDirectory() as directory:
-                    path = Path(directory) / "logger.csv"
-                    pd.DataFrame(rows, columns=["Frame", "Timestamp", "Value"]).to_csv(path, index=False)
-                    result = extract_logger_events(path, initial_low_baseline=True)
-                expected = [10, 11, 12, 13] if initial_high else [11, 12, 13]
-                np.testing.assert_array_equal(result.transition_frames, expected)
+            for first_frame in (9, 10, 11, 30):
+                with self.subTest(initial_high=initial_high, first_frame=first_frame):
+                    rows = [(10, 1.0, "STARTSLAP"), (10, 1.0, "StimStart-one")]
+                    states = [initial_high, initial_high, not initial_high, initial_high,
+                              not initial_high, not initial_high]
+                    rows.extend((first_frame + i, 1 + i / 60, f"Photodiode-{int(state)}") for i, state in enumerate(states))
+                    rows.sort(key=lambda row: row[0])
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / "logger.csv"
+                        pd.DataFrame(rows, columns=["Frame", "Timestamp", "Value"]).to_csv(path, index=False)
+                        result = extract_logger_events(path, initial_low_baseline=True)
+                        legacy = extract_logger_events(path)
+                    changes = np.array([2, 3, 4]) + first_frame
+                    expected = np.insert(changes, 0, first_frame) if initial_high else changes
+                    np.testing.assert_array_equal(result.transition_frames, expected)
+                    np.testing.assert_array_equal(result.transition_states,
+                                                  [True, False, True, False] if initial_high else [True, False, True])
+                    # Legacy mode still inserts the first state only at STARTSLAP.
+                    legacy_expected = np.insert(changes, 0, first_frame) if first_frame == 10 else changes
+                    np.testing.assert_array_equal(legacy.transition_frames, legacy_expected)
 
     def test_observed_initial_falling_edge_is_not_removed(self):
         rows = [(9, 0.9, "Photodiode-1"), (10, 1, "STARTSLAP"), (10, 1, "StimStart-one")]
@@ -114,8 +124,8 @@ class StimulusSyncTests(unittest.TestCase):
             path = Path(directory) / "logger.csv"
             pd.DataFrame(rows, columns=["Frame", "Timestamp", "Value"]).to_csv(path, index=False)
             result = extract_logger_events(path, initial_low_baseline=True)
-        np.testing.assert_array_equal(result.transition_frames, [10, 11, 12, 13])
-        self.assertFalse(result.transition_states[0])
+        np.testing.assert_array_equal(result.transition_frames, [9, 10, 11, 12, 13])
+        np.testing.assert_array_equal(result.transition_states, [True, False, True, False, True])
 
     def test_do2_is_fallback_without_logger(self):
         expected = np.asarray([1.0, 2.0])

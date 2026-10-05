@@ -48,14 +48,14 @@ class MovieFramePackagingTests(unittest.TestCase):
                         # HDMF supplies external_resources dynamically; NWBFile
                         # is concrete at runtime despite the upstream type warning.
                         nwb = pynwb.NWBFile("test", scenario, datetime.now(timezone.utc))  # pyright: ignore[reportAbstractUsage]
-                        plot_path = root / scenario / "movie_frame_timing.png"
+                        plot_path = root / scenario / "photodiode_sync.png"
                         with patch.object(stimulus_sync, "align_logger_frames_to_harp", return_value=(frames, times, qc)) as align:
-                            with patch.object(stimulus_sync, "extract_harp_photodiode_transitions", return_value=([], [], 0.5)):
+                            with patch.object(stimulus_sync, "extract_harp_photodiode_transitions", return_value=(times, np.zeros(len(times)), 0.5)):
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore", RuntimeWarning)
                                     metadata = run_capsule.add_stim_table(
                                         nwb, table_path, logger_path, harp, movies.LOGGER_FORMAT,
-                                        movie_frame_qc_path=plot_path,
+                                        photodiode_qc_path=plot_path,
                                     )
                         align.assert_called_once()
                         self.assertEqual(plot_path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
