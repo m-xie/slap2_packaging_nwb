@@ -3,11 +3,11 @@
 	"attached_datasets": [
 		{
 			"id": "53c60a23-f796-4929-a388-eec7fa7cdaef",
-			"mount": "878030_2026-08-31_14-17-19_source-extracted_2026-10-01_00-58-53"
+			"mount": "slap2_source-extracted"
 		},
 		{
 			"id": "eda6f8af-a6c9-4669-88ab-fcf8d6620123",
-			"mount": "878030_2026-08-31_14-17-19"
+			"mount": "slap2_session"
 		}
 	]
 }
