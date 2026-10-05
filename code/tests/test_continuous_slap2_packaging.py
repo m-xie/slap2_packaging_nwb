@@ -296,6 +296,29 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
         self.assert_packaged("DMD1", [0.0, 0.5, 2.0, 3.25])
         self.assert_packaged("DMD2", [0.0, 1.0, 2.5, 3.5])
 
+    def test_soma_uses_continuous_clock_and_excludes_unsupported_samples(self):
+        group = self.summary["Path1"].create_group("user_rois")
+        group.create_dataset("labels", data=[[b"soma"]])
+        group.create_dataset("mask", data=np.ones((2, 3, 1, 1), dtype=np.uint8))
+        values = np.arange(8, dtype=float).reshape(4, 2, 1)
+        for key, offset in (("F", 0), ("Fsvd", 100)):
+            group.create_dataset(key, data=values + offset)
+        self.path_metadata["Path1"]["total_lines"] = 8
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            self.package()
+        ophys = self.nwb.processing["ophys"]
+        container = ophys["SomaFluorescence_DMD1"]
+        for key, offset in (("F", 0), ("Fsvd", 100)):
+            for channel, color in enumerate(("green", "red")):
+                series = container.roi_response_series[f"DMD1_soma_{key}_{color}"]
+                np.testing.assert_array_equal(series.data, (values + offset)[:3, channel, :])
+                np.testing.assert_allclose(series.timestamps, [0.0, 0.5, 2.0])
+                self.assertEqual(series.rois.table.name, "SomaPlaneSegmentation_DMD1")
+        self.assertNotIn("SomaFluorescence_DMD2", ophys.data_interfaces)
+        self.assert_packaged("DMD1", [0.0, 0.5, 2.0, np.nan])
+        self.assert_packaged("DMD2", [0.0, 1.0, 2.5, 3.5])
+
     def test_dat_names_without_trial_are_discovered_as_trial_one(self):
         for path in self.dat_paths.values():
             path.rename(path.with_name(path.name.replace("-TRIAL000001", "")))

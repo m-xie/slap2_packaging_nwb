@@ -3,6 +3,24 @@
 Packages synchronized SLAP2 fluorescence, visual stimuli, running, and eye
 tracking into NWB, with associated QC and processing provenance.
 
+## Soma ROI traces
+
+When a source-bearing plane has `user_rois/labels` equal to `soma`
+(case-insensitive, ignoring surrounding whitespace), its user-drawn soma ROIs
+are packaged separately from extracted sources:
+
+- `processing/ophys/ImageSegmentation/SomaPlaneSegmentation_DMD1` stores the
+	projected user ROI masks, z extents, original labels, and zero-based user ROI indices.
+- `processing/ophys/SomaFluorescence_DMD1` contains `DMD1_soma_F_green` and
+	`DMD1_soma_F_red`, plus `DMD1_soma_Fsvd_green` and `DMD1_soma_Fsvd_red` when
+	`Fsvd` is available. Only recorded channels are written; DMD names vary by plane.
+
+These are the original `user_rois/F` and `user_rois/Fsvd` values, not source
+`F0` or derived dF/F. They retain fluorescence NaNs and share the plane's HARP
+timestamps, leading/trailing trial exclusions, and removal of samples with
+non-finite timestamps. Existing source traces and QC selection are unchanged.
+Absent user ROIs or labels other than `soma` add no soma output.
+
 ## Random Natural Movies
 
 Select **Random Natural Movies** in the capsule's **Logger Format** setting

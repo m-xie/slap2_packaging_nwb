@@ -17,6 +17,7 @@ from slap2_continuous_sync import build_continuous_clock, map_continuous_lines
 from slap2_path_metadata import read_path_metadata
 import slap2_running_packaging as running_packaging
 import slap2_eye_tracking_packaging as eye_tracking_packaging
+import slap2_soma_packaging as soma_packaging
 from qc import slap2_dff_qc
 from qc import slap2_receptive_fields_qc as slap2_rf_qc
 from qc import stim_tuning_qc
@@ -950,6 +951,7 @@ def filter_slap2_acquisition(
     df_denoised_data,
     events_data,
     acquisition_resolution,
+    additional_traces=None,
 ):
     """Apply shared leading and trailing trial exclusions to one DMD."""
     selected_prefix = acquisition_resolution['acquisition_prefix']
@@ -998,6 +1000,8 @@ def filter_slap2_acquisition(
         'dF_denoised': df_denoised_data,
         'events': events_data,
     }
+    additional_traces = additional_traces or {}
+    sample_arrays.update(additional_traces)
     for name, values in sample_arrays.items():
         if len(values) != expected_samples:
             raise ValueError(
@@ -1047,6 +1051,10 @@ def filter_slap2_acquisition(
         'F0': f0_data[sample_start:sample_end],
         'dF_denoised': df_denoised_data[sample_start:sample_end],
         'events': events_data[sample_start:sample_end],
+        'additional_traces': {
+            name: values[sample_start:sample_end]
+            for name, values in additional_traces.items()
+        },
     }
 
 
@@ -1108,6 +1116,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
 
     frame_line_idxs  = dmd_group['frame_info']['frame_line_idxs'][0]
     trial_num_frames = dmd_group['frame_info']['trial_num_frames'][()][0]
+    soma_traces = soma_packaging.read_soma_traces(dmd_group, len(frame_line_idxs))
     processing_chunk_num_frames = trial_num_frames.copy()
     if continuous_mode:
         trial_num_frames = np.asarray(
@@ -1125,6 +1134,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
         df_denoised_data,
         events_data,
         acquisition_resolution,
+        additional_traces=soma_traces,
     )
     trial_num_frames = filtered['trial_num_frames']
     frame_line_idxs = filtered['frame_line_idxs']
@@ -1132,6 +1142,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
     df_denoised_data = filtered['dF_denoised']
     events_data = filtered['events']
     dat_paths = filtered['dat_paths']
+    soma_traces = filtered['additional_traces']
 
     if continuous_clock is not None:
         if not continuous_mode or path_metadata is None:
@@ -1142,6 +1153,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
             recorded_line_count=path_metadata['total_lines'],
         )
         fluorescence = {'F0': f0_data, 'dF_denoised': df_denoised_data, 'events': events_data}
+        fluorescence.update(soma_traces)
         unsupported = int(np.count_nonzero(~np.isfinite(timestamps)))
         if unsupported:
             warnings.warn(
@@ -1194,6 +1206,7 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
         'dF_denoised': df_denoised_data,
         'events':      events_data,
     }
+    fluorescence.update(soma_traces)
 
     if dat_paths is not None:
         trial_num_cycles = slap2_sync.get_trial_num_cycles(dat_paths, len(trial_num_frames))
@@ -1620,6 +1633,10 @@ def add_ophys_to_nwb(
 
         if plane not in source_planes:
             continue
+        soma_packaging.add_soma_fluorescence(
+            experiment_summary[plane], fluorescence, timestamps, dmd_name,
+            imaging_plane, image_segmentation, ophys_mod, get_pixel_mask,
+        )
         roi_table = add_image_segmentation(experiment_summary, imaging_plane, dmd_name, image_segmentation, plane_key=plane)
         add_fluorescence(fluorescence, timestamps, dmd_name, roi_table, ophys_mod)
 
