@@ -13,6 +13,8 @@ import stimulus_sync
 import random_natural_movies
 from slap2_dat_utils import parse_dat_file, validate_dat_files
 import slap2_synching as slap2_sync
+from slap2_continuous_sync import build_continuous_clock, map_continuous_lines
+from slap2_path_metadata import read_path_metadata
 import slap2_running_packaging as running_packaging
 import slap2_eye_tracking_packaging as eye_tracking_packaging
 from qc import slap2_dff_qc
@@ -314,8 +316,13 @@ def main():
         nwbfile = nwb_io.read()
         with h5py.File(experiment_summary_path, "r") as experiment_summary:
             harp_data = harp_utils.extract_harp(harp_path)
+            # Both formats use the same startup-pair and associated DO2 cleanup.
             harp_data = harp_utils.trim_leading_trial_pulse_artifact(harp_data)
-            harp_data, exclude_final_trial = trim_unterminated_harp_trial(harp_data)
+            if logger_format == random_natural_movies.LOGGER_FORMAT:
+                harp_utils.qc_continuous_harp(harp_data)
+                exclude_final_trial = False
+            else:
+                harp_data, exclude_final_trial = harp_utils.trim_unterminated_harp_trial(harp_data)
             qc_folder = results_folder / qc_folder_name
             qc_folder.mkdir(exist_ok=True)
             (qc_folder / 'syncing').mkdir(exist_ok=True)
@@ -336,6 +343,7 @@ def main():
                 session_path,
                 qc_folder,
                 exclude_final_trial=exclude_final_trial,
+                logger_format=logger_format,
             )
             ophys_end_time = datetime.now().astimezone()
             # Wheel counts already share the normalized HARP clock with SLAP2.
@@ -506,49 +514,6 @@ def infer_continuous_slap2_mode(experiment_summary, plane_inputs, harp_data):
                 return False
 
     return True
-
-
-def trim_unterminated_harp_trial(harp_data):
-    """Exclude an unterminated trailing trial unless it may be continuous.
-
-    A sole DO0 without DO1 is preserved provisionally. Continuous-mode
-    inference later validates it using chunked .dat files and continued line
-    indices. An unmatched final DO0 in a multi-trial session is still removed.
-    """
-    starts = harp_data['normalized_slap2_start']
-    ends = harp_data['normalized_slap2_end']
-    excluded_trailing_trials = 0
-
-    # Do not erase the only acquisition before continuous-mode inference has
-    # inspected its .dat chunks and source-extraction line indices.
-    if len(starts) == 1 and len(ends) == 0:
-        return dict(harp_data), False
-    if len(starts) == len(ends) + 1 and starts[-1] > ends[-1]:
-        excluded_trailing_trials = 1
-    elif len(starts) != len(ends):
-        raise ValueError(
-            f"Unsupported SLAP2 trial pulse mismatch: {len(starts)} starts and "
-            f"{len(ends)} ends."
-        )
-
-    trimmed = dict(harp_data)
-    if not excluded_trailing_trials:
-        return trimmed, False
-
-    for key in ('slap2_start_signal', 'slap2_start_times', 'normalized_slap2_start'):
-        trimmed[key] = harp_data[key][:-1]
-    last_complete_end = ends[-1]
-    keep_clock = harp_data['slap2_cycle_clock_times'] <= last_complete_end
-    trimmed['slap2_cycle_clock_signal'] = harp_data['slap2_cycle_clock_signal'][keep_clock]
-    trimmed['slap2_cycle_clock_times'] = harp_data['slap2_cycle_clock_times'][keep_clock]
-    trimmed['normalized_slap2_cycle_clock_times'] = trimmed['slap2_cycle_clock_times']
-    warnings.warn(
-        "The final SLAP2 trial has a start pulse but no end pulse; excluding the "
-        "final trial from fluorescence packaging.",
-        RuntimeWarning,
-        stacklevel=2,
-    )
-    return trimmed, True
 
 
 def find_slap2_trial_index(time, start_trials, end_trials):
@@ -1143,7 +1108,7 @@ def filter_slap2_acquisition(
     }
 
 
-def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, harp_data, trial_line_time_maps=None, primary_qc=None, qc_folder=None, dat_paths=None, plane_key=None, acquisition_resolution=None, continuous_mode=False):
+def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, harp_data, trial_line_time_maps=None, primary_qc=None, qc_folder=None, dat_paths=None, plane_key=None, acquisition_resolution=None, continuous_mode=False, continuous_clock=None, path_metadata=None):
     plane_key = plane_key or dmd_name
     """
     Extract fluorescence traces and compute HARP-aligned timestamps for one SLAP2 DMD plane.
@@ -1186,11 +1151,16 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
         and 'timestamps'.
     """
     dmd_group = experiment_summary[plane_key]
-    temporal_sources = dmd_group['sources']['temporal']
-
-    f0_data          = temporal_sources['F0'][()]
-    df_denoised_data = temporal_sources['dF_denoised'][()]
-    events_data      = temporal_sources['events'][()]
+    if 'sources' in dmd_group and len(dmd_group['sources']) > 0:
+        temporal_sources = dmd_group['sources']['temporal']
+        f0_data          = temporal_sources['F0'][()]
+        df_denoised_data = temporal_sources['dF_denoised'][()]
+        events_data      = temporal_sources['events'][()]
+    else:
+        # A source-free DMD1 still supplies the legacy primary clock. Empty
+        # channel/ROI axes avoid allocating traces; nothing is packaged for it.
+        sample_count = len(dmd_group['frame_info']['frame_line_idxs'][0])
+        f0_data = df_denoised_data = events_data = np.empty((sample_count, 0, 0))
 
     assert df_denoised_data.shape == f0_data.shape == events_data.shape, "Traces must have same shape"
 
@@ -1220,6 +1190,49 @@ def sync_slap2_fluorescence(dmd_name, dmd_num, experiment_summary, meta_paths, h
     df_denoised_data = filtered['dF_denoised']
     events_data = filtered['events']
     dat_paths = filtered['dat_paths']
+
+    if continuous_clock is not None:
+        if not continuous_mode or path_metadata is None:
+            raise ValueError("Sequential DI3 synchronization requires continuous mode and raw path metadata")
+        # Do not rebase to the first extracted sample: extraction may omit a prefix.
+        timestamps = map_continuous_lines(
+            frame_line_idxs, continuous_clock,
+            recorded_line_count=path_metadata['total_lines'],
+        )
+        fluorescence = {'F0': f0_data, 'dF_denoised': df_denoised_data, 'events': events_data}
+        unsupported = int(np.count_nonzero(~np.isfinite(timestamps)))
+        if unsupported:
+            warnings.warn(
+                f"{dmd_name}: {unsupported} fluorescence samples lack valid DI3 timing; "
+                "retaining NaN timestamps for QC and excluding these samples from NWB.",
+                RuntimeWarning, stacklevel=2,
+            )
+        plane_qc = {
+            'acquisition_prefix': filtered['acquisition_prefix'],
+            'excluded_trial_count': filtered['excluded_trial_count'],
+            'raw_frame_line_idxs': frame_line_idxs.copy(),
+            'frame_line_idxs': frame_line_idxs,
+            'trial_num_frames': trial_num_frames,
+            'processing_chunk_num_frames': processing_chunk_num_frames,
+            'lines_per_cycle': path_metadata['lines_per_cycle'],
+            'timestamps': timestamps,
+            'path_metadata': path_metadata,
+            'continuous_clock_qc': continuous_clock['qc'],
+            'unsupported_sample_count': unsupported,
+        }
+        if qc_folder is not None:
+            qc_folder = Path(qc_folder)
+            qc_folder.mkdir(parents=True, exist_ok=True)
+            summary = {
+                'dmd': dmd_name, 'path_metadata': path_metadata,
+                'clock': continuous_clock['qc'], 'sample_count': len(timestamps),
+                'unsupported_sample_count': unsupported,
+                'stored_sample_count': len(timestamps) - unsupported,
+                'processing_chunk_num_frames': processing_chunk_num_frames.tolist(),
+            }
+            with (qc_folder / f'{dmd_name}_continuous_sync.json').open('w') as stream:
+                json.dump(summary, stream, indent=2)
+        return fluorescence, timestamps, None, plane_qc
 
     print('using slap2 acquisition:', filtered['acquisition_prefix'])
     print('using slap2 meta file:', filtered['meta_path'])
@@ -1331,11 +1344,23 @@ def add_fluorescence(fluorescence, timestamps, dmd_name, roi_table, ophys_mod):
     f0_data         = fluorescence['F0']
     df_denoised_data = fluorescence['dF_denoised']
 
+    timestamps = np.asarray(timestamps)
+    valid = np.isfinite(timestamps)
+    if not np.all(valid):
+        warnings.warn(
+            f"{dmd_name}: removing {np.count_nonzero(~valid)} fluorescence samples "
+            "with non-finite timestamps from NWB.",
+            RuntimeWarning, stacklevel=2,
+        )
+        timestamps = timestamps[valid]
+        f0_data = f0_data[valid]
+        df_denoised_data = df_denoised_data[valid]
+
     eps = 1e-6
     dff_data = df_denoised_data / (f0_data + eps)
 
     fluorescence_obj = pynwb.ophys.Fluorescence(name=f"Fluorescence_{dmd_name}")
-    ophys_mod.add_data_interface(fluorescence_obj)
+    ophys_mod.add(fluorescence_obj)
 
     for ch_idx, ch_name in enumerate(["green", "red"]):
         if ch_idx >= f0_data.shape[1]:
@@ -1406,7 +1431,7 @@ def add_mean_images(experiment_summary, dmd_name, ophys_mod, plane_key=None):
             timestamps=[0.0],
             description=f"Registered mean image for {dmd_name}, channel {ch} (motion corrected)"
         )
-        ophys_mod.add_data_interface(mean_image_series)
+        ophys_mod.add(mean_image_series)
     act_image_series = pynwb.image.ImageSeries(
         name=f"{dmd_name}_activity_image",
         data=act_im[None, ...],  # shape (1, height, width)
@@ -1415,7 +1440,7 @@ def add_mean_images(experiment_summary, dmd_name, ophys_mod, plane_key=None):
         timestamps=[0.0],
         description=f"Registered activity image for {dmd_name} (motion corrected)"
     )
-    ophys_mod.add_data_interface(act_image_series)
+    ophys_mod.add(act_image_series)
 
 
 def create_device(nwbfile, instrument_json):
@@ -1465,6 +1490,50 @@ def filter_planes_with_sources(plane_inputs, experiment_summary):
     return planes_with_sources
 
 
+def prepare_continuous_slap2(plane_inputs, harp_data):
+    """Build the raw primary-path clock, even if that plane has no sources.
+
+    DMD1 is required and is always the primary path, independent of source count.
+    Source-extraction chunks are not acquisition trials.
+    """
+    primary = next((entry for entry in plane_inputs if int(entry[2]) == 1), None)
+    if primary is None or not primary[4]:
+        raise ValueError("DMD1 is required as the primary path, including its raw .dat files")
+    parsed = [parse_dat_file(path) for entry in plane_inputs for path in entry[4]]
+    if not parsed or len({item.acquisition_prefix.lower() for item in parsed}) != 1:
+        raise ValueError("Random Natural Movies requires exactly one raw SLAP2 acquisition")
+    if any(item.trial_number != 1 for item in parsed):
+        raise ValueError("Random Natural Movies requires raw TRIAL1; processing chunks are not acquisition trials")
+    metadata_by_plane = {}
+    for plane, _, _, _, paths, _ in plane_inputs:
+        metadata_by_plane[plane] = read_path_metadata(paths)
+    path_info = metadata_by_plane[primary[0]]
+    recording_start = harp_data.get('recording_start_time')
+    if recording_start is None:
+        # This is not normalized t=0 (DO0); HARP can record before DO0.
+        recording_start = min(
+            float(np.asarray(harp_data[key])[0])
+            for key in ('analog_times', 'slap2_cycle_clock_times')
+            if key in harp_data and len(harp_data[key])
+        )
+    clock = build_continuous_clock(
+        harp_data['slap2_cycle_clock_signal'], harp_data['slap2_cycle_clock_times'],
+        path_info['lines_per_cycle'], path_info['total_cycles'],
+        recording_start=recording_start,
+    )
+    clock['qc']['primary_dmd'] = primary[1]
+    clock['qc']['path_metadata_source'] = path_info['source']
+    clock['qc']['clock_reference'] = 'seconds relative to first recorded SLAP2 DO0 pulse (normalized HARP)'
+    if 'time_reference' in harp_data:
+        clock['qc']['harp_time_reference_seconds'] = float(harp_data['time_reference'])
+    resolution = {
+        'acquisition_prefix': parsed[0].acquisition_prefix,
+        'excluded_trial_count': 0, 'excluded_trailing_trials': 0,
+        'retained_trial_count': 1, 'highest_dat_trial': 1,
+    }
+    return resolution, clock, metadata_by_plane
+
+
 def add_ophys_to_nwb(
     experiment_summary,
     nwbfile,
@@ -1474,6 +1543,7 @@ def add_ophys_to_nwb(
     session_path,
     qc_folder=None,
     exclude_final_trial=False,
+    logger_format=None,
 ):
     """
     Build the full ophys structure in the NWB file, iterating over DMDs (planes).
@@ -1485,7 +1555,7 @@ def add_ophys_to_nwb(
     ophys_mod = pynwb.ProcessingModule('ophys', 'Ophys processing module')
     nwbfile.add_processing_module(ophys_mod)
     image_segmentation = pynwb.ophys.ImageSegmentation()
-    ophys_mod.add_data_interface(image_segmentation)
+    ophys_mod.add(image_segmentation)
     trial_line_time_maps = None
     primary_qc = None
     secondary_qc = {}
@@ -1498,25 +1568,38 @@ def add_ophys_to_nwb(
         if not dmd_name:
             continue
         meta_paths = list(session_path.rglob(f"*DMD{dmd_num}.meta"))
-        dat_paths = list(session_path.rglob(f"*DMD{dmd_num}-TRIAL*.dat"))
+        if logger_format == random_natural_movies.LOGGER_FORMAT:
+            dat_paths = [
+                path for path in session_path.rglob("*.dat")
+                if re.search(rf"_DMD{dmd_num}(?:-|\.dat$)", path.name, re.IGNORECASE)
+            ]
+        else:
+            # Legacy discovery requires an explicit acquisition trial token.
+            dat_paths = list(session_path.rglob(f"*DMD{dmd_num}-TRIAL*.dat"))
         n_summary_trials = len(experiment_summary[plane]['frame_info']['trial_num_frames'][()][0])
         plane_inputs.append((plane, dmd_name, dmd_num, meta_paths, dat_paths, n_summary_trials))
 
+    plane_inputs.sort(key=lambda entry: int(entry[2]))
+    if not plane_inputs or int(plane_inputs[0][2]) != 1 or not plane_inputs[0][4]:
+        raise ValueError("DMD1 is required as the primary path, including its raw .dat files")
     source_plane_inputs = filter_planes_with_sources(plane_inputs, experiment_summary)
     source_planes = {plane_input[0] for plane_input in source_plane_inputs}
-    summary_trial_counts = {plane_input[-1] for plane_input in source_plane_inputs}
-    if len(summary_trial_counts) != 1:
+    # Legacy timing needs DMD1's frame indices even when it has no sources.
+    timing_plane_inputs = [entry for entry in plane_inputs
+                           if entry[0] in source_planes or int(entry[2]) == 1]
+    summary_trial_counts = {plane_input[-1] for plane_input in timing_plane_inputs}
+    if len(summary_trial_counts) != 1 and logger_format != random_natural_movies.LOGGER_FORMAT:
         raise ValueError(
             f"DMD experiment summaries have different trial counts: "
             f"{sorted(summary_trial_counts)}"
         )
     all_dat_paths = [
         dat_path
-        for _, _, _, _, dat_paths, _ in source_plane_inputs
+        for _, _, _, _, dat_paths, _ in timing_plane_inputs
         for dat_path in dat_paths
     ]
-    continuous_mode = infer_continuous_slap2_mode(
-        experiment_summary, source_plane_inputs, harp_data
+    continuous_mode = logger_format == random_natural_movies.LOGGER_FORMAT or infer_continuous_slap2_mode(
+        experiment_summary, timing_plane_inputs, harp_data
     )
     # Missing DO1 is supported only after the independent continuous-acquisition
     # evidence above succeeds. Trial-based data still require closing pulses.
@@ -1532,19 +1615,28 @@ def add_ophys_to_nwb(
     effective_trial_count = 1 if continuous_mode else summary_trial_counts.pop()
     if continuous_mode:
         print(
-            "Continuous SLAP2 mode inferred: treating source-extraction chunks "
+            "Continuous SLAP2 mode: treating source-extraction chunks "
             "as one acquisition trial."
         )
-    acquisition_resolution = resolve_slap2_acquisition(
-        all_dat_paths,
-        effective_trial_count,
-        excluded_trailing_trials=int(exclude_final_trial),
-    )
+    continuous_clock = None
+    path_metadata_by_plane = {}
+    if logger_format == random_natural_movies.LOGGER_FORMAT:
+        if exclude_final_trial:
+            raise ValueError("Cannot exclude acquisition trials in Random Natural Movies continuous mode")
+        acquisition_resolution, continuous_clock, path_metadata_by_plane = prepare_continuous_slap2(
+            plane_inputs, harp_data,
+        )
+    else:
+        acquisition_resolution = resolve_slap2_acquisition(
+            all_dat_paths,
+            effective_trial_count,
+            excluded_trailing_trials=int(exclude_final_trial),
+        )
 
     for plane, dmd_name, dmd_num, meta_paths, dat_paths, _ in plane_inputs:
         imaging_plane = create_imaging_plane(nwbfile, dmd_name, device, acquisition_json, plane_key=plane)
         add_mean_images(experiment_summary, dmd_name, ophys_mod, plane_key=plane)
-        if plane not in source_planes:
+        if plane not in source_planes and (continuous_clock is not None or int(dmd_num) != 1):
             continue
 
         print(f'found {len(dat_paths)} .dat files for DMD{dmd_num}')
@@ -1558,6 +1650,8 @@ def add_ophys_to_nwb(
             plane_key=plane,
             acquisition_resolution=acquisition_resolution,
             continuous_mode=continuous_mode,
+            continuous_clock=continuous_clock,
+            path_metadata=path_metadata_by_plane.get(plane),
         )
         if selected_acquisition_prefix is None:
             selected_acquisition_prefix = plane_qc['acquisition_prefix']
@@ -1582,6 +1676,8 @@ def add_ophys_to_nwb(
                 'secondary_timestamps': plane_qc['timestamps'],
             }
 
+        if plane not in source_planes:
+            continue
         roi_table = add_image_segmentation(experiment_summary, imaging_plane, dmd_name, image_segmentation, plane_key=plane)
         add_fluorescence(fluorescence, timestamps, dmd_name, roi_table, ophys_mod)
 

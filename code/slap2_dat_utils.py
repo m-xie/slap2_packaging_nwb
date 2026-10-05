@@ -15,7 +15,7 @@ class DatFileInfo:
 
 SLAP2_DAT_PATTERN = re.compile(
     r'^(?P<prefix>.+_(?P<timestamp>\d{8}_\d{6}))_DMD'
-    r'(?P<dmd>\d+)-TRIAL(?P<trial>\d+)'
+    r'(?P<dmd>\d+)(?:-TRIAL(?P<trial>\d+))?'
     # Newer acquisitions can split one logical trial into cycle-based chunks.
     r'(?:-CYCLE-(?P<cycle>\d+))?\.dat$',
     re.IGNORECASE,
@@ -23,14 +23,14 @@ SLAP2_DAT_PATTERN = re.compile(
 
 
 def parse_dat_file(dat_path):
-    """Parse legacy and cycle-chunked SLAP2 .dat filenames."""
+    """Parse legacy and cycle-chunked names; omitted TRIAL means trial 1."""
     match = SLAP2_DAT_PATTERN.match(dat_path.name)
     if match is None:
         raise ValueError(
             f"Unsupported SLAP2 .dat filename format: {dat_path.name}. Expected "
             f"<label>_YYYYMMDD_HHMMSS_DMD<number>-TRIAL<number>.dat or "
             f"<label>_YYYYMMDD_HHMMSS_DMD<number>-TRIAL<number>-"
-            f"CYCLE-<offset>.dat."
+            f"CYCLE-<offset>.dat. The -TRIAL<number> token may be omitted (trial 1)."
         )
     cycle = match.group('cycle')
     return DatFileInfo(
@@ -38,7 +38,7 @@ def parse_dat_file(dat_path):
         acquisition_prefix=match.group('prefix'),
         acquisition_timestamp=match.group('timestamp'),
         dmd_number=int(match.group('dmd')),
-        trial_number=int(match.group('trial')),
+        trial_number=int(match.group('trial') or 1),
         cycle_offset=None if cycle is None else int(cycle),
     )
 

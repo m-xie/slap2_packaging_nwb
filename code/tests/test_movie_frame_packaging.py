@@ -77,6 +77,7 @@ class MovieFramePackagingTests(unittest.TestCase):
                             self.assertNotIn("anchor_frames", provenance)
                             self.assertNotIn("anchor_times", provenance)
                             self.assertEqual(provenance["harp_time_reference_seconds"], 12345.0)
+                            self.assertNotIn("startup_handling", provenance)
                             for column, (dtype, _) in movies.MOVIE_FRAME_COLUMNS.items():
                                 self.assertEqual(intervals[column].target.data.dtype, np.dtype(dtype))
                                 self.assertIn("Empty for non-movie rows", intervals[column].target.description)

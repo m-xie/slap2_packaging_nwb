@@ -51,7 +51,7 @@ arrays (non-movie rows contain typed empty arrays):
 
 | Column | Meaning |
 | --- | --- |
-| `movie_frame_timestamps` | Float64 onset estimates in seconds relative to the first SLAP2 DO0 pulse, matching the existing normalized HARP clock. Unsupported events have `NaN` timestamps. |
+| `movie_frame_timestamps` | Float64 onset estimates in seconds relative to the first recorded SLAP2 DO0 pulse, matching the shared normalized HARP clock. Startup removal does not change this origin. Unsupported events have `NaN` timestamps. |
 | `movie_frame_numbers` | Original 1-based `MovieFrame-N` logger counters, reset for each presentation. |
 | `movie_display_frames` | Global logger `Frame` coordinates for those events. |
 | `movie_frame_timing_status` | UInt8 codes: **0** anchored, **1** interpolated, **2** endpoint-extrapolated, **3** unsupported. |
@@ -94,6 +94,83 @@ The existing session-level p95 affine residual gate is 40 ms; passing it does
 not establish sub-frame precision. Zero residual at an interpolation anchor is
 not a timing-accuracy measurement. Validate logger event semantics and optical
 timing before interpreting these counters as exact MP4-frame onsets.
+
+#### Continuous SLAP2 synchronization
+
+For **Random Natural Movies**, SLAP2 is always treated as one continuous raw
+acquisition. Source-extraction chunks are concatenated independently for each
+DMD; different chunk counts do not imply different acquisition trials. Raw
+files must describe one acquisition and logical `TRIAL1`, either unchunked or
+contiguous cycle chunks starting at offset zero. The `-TRIAL<number>` token may
+be omitted; these files all belong to trial 1 (for example,
+`<acquisition>_DMD1.dat` or `<acquisition>_DMD1-CYCLE-000000.dat`). Before synchronization, an
+initial DO0/DO1 pair is rejected when its positive duration is less than 100 ms
+and less than 10% of the median later paired duration (the existing startup
+heuristic). At least two complete pairs are required for this startup heuristic.
+After trimming, exactly one finite start and zero or one finite stop must remain.
+If present, the stop must follow the start. Missing starts or extra markers raise
+an error. DO1 is optional: imaging timestamps come from DI3, and stimulus trial
+labeling uses an open interval when no stop is recorded.
+
+The first recorded DO0 remains time zero, even if that marker is discarded.
+Startup removal does not re-zero retained timestamps, recording onset, or the
+absolute `time_reference`. Stimulus, imaging, running, and eye data continue to
+share this original HARP origin. No DI3 pulses or analog samples are removed.
+Shared startup cleanup removes associated early DO2 events for both formats;
+Random Natural Movies does not use DO2. Data preceding the first recorded DO0
+retain negative timestamps; the retained acquisition start may be positive.
+The retained markers define the acquisition interval without further slicing.
+
+The first detected DI3 pulse is **primary path cycle 1**, the next is cycle 2,
+and so on. There is no gap segmentation, leading-pulse reconciliation,
+pre-DO0 pulse filtering, or effective-lines-per-cycle calculation in this mode.
+DMD1 is always the primary, even when it has no extracted sources; secondary
+source-bearing DMDs do not replace it. Missing DMD1 or its raw files is an error.
+A DI3 pulse requires an observed low-to-high transition. An initially high
+state always produces a warning but is not counted as a pulse.
+
+Exact `linesPerCycle` and complete recorded cycle counts are obtained through
+the pinned **SLAP2_Utils** raw-header parser (`load_file_header_v2`, also used by
+its `DataFile` class), with read-only memory mapping. Full fluorescence data and
+metadata are not loaded merely to count cycles. Chunk lengths are checked
+against filename offsets, counts are summed, and changing cycle lengths fail.
+Both planes retain their original global, 1-based scan-line coordinates.
+Primary cycle boundary lines are `1 + cycle_index * lines_per_cycle`; each
+fluorescence sample is interpolated at its actual scan-line position between
+the corresponding DI3 boundaries. Missing early extracted samples do not shift
+the clock. Secondary samples use that same primary scanner-line map, checked
+against their own raw path's recorded line count.
+Scan-line indices beyond that count produce a warning and receive `NaN`
+timestamps, even if covered by the shared clock. Before constructing NWB
+fluorescence series, samples with non-finite timestamps are removed from both
+timestamps and fluorescence arrays. Unfiltered timestamps remain available in
+memory for synchronization QC; unsupported samples are not stored in NWB.
+
+For `C` complete primary cycles and `P` detected DI3 pulses:
+
+- Require `C >= P - 1`, allowing one extra pulse for the start of a final cycle
+	not logged completely by SLAP2. More extra pulses raise an error.
+- When `P == C + 1`, the extra pulse supplies the measured end of cycle `C`.
+- Otherwise, with at least two pulses, only the last observed cycle's end is
+	estimated from the mean measured cycle period, with a warning. No later
+	cycle starts are fabricated; samples in unobserved cycles receive `NaN`.
+- With one pulse, only its exact cycle-start line can be timed. No pulses fail.
+- A high DI3 state at recording onset, or the first rising edge within **1 ms**
+	of onset, warns that SLAP2 may have started before HARP began recording.
+	Recording onset uses the earliest recorded analog/digital timestamp, not
+	normalized DO0 time zero. Because digital logging is event-driven, a first
+	high record well after HARP onset does not trigger this onset warning, but
+	still triggers the initial-high warning and is not counted. All observed
+	low-to-high pulses are retained; an unknown missing prefix is not guessed
+	or corrected.
+
+Per-DMD JSON reports in the synchronization QC directory include raw path
+counts, primary identity, pulse counts, onset warnings, final-cycle policy,
+and unsupported/stored sample counts. Imaging alignment anchors are not saved
+in NWB. Legacy logger formats retain their trial-based timing algorithms and
+initial-high behavior: an initial high state contributes a synthetic pulse at
+the first sample's timestamp without an initial-high warning. DMD1 remains
+primary, and non-finite fluorescence timestamps are excluded from NWB as above.
 
 #### Interval timing and recovery
 

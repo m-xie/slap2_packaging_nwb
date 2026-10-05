@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
+from harp_utils import trim_unterminated_harp_trial
 
 from run_capsule import (
     ensure_was_generated_by,
@@ -15,7 +16,6 @@ from run_capsule import (
     infer_continuous_slap2_mode,
     read_stim_csv,
     resolve_slap2_acquisition,
-    trim_unterminated_harp_trial,
 )
 
 

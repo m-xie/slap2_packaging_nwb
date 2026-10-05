@@ -25,7 +25,7 @@ MAX_INTERPOLATION_GAP_FACTOR = 3.0
 MOVIE_FRAME_STATUS = {"anchored": 0, "interpolated": 1, "extrapolated": 2, "unsupported": 3}
 MOVIE_FRAME_COLUMNS = {
     "movie_frame_timestamps": (np.float64,
-        "Estimated movie-frame onsets in seconds relative to the first SLAP2 DO0 pulse, "
+        "Estimated movie-frame onsets in seconds relative to the first recorded SLAP2 DO0 pulse, "
         "on the normalized HARP clock. Piecewise-linear photodiode alignment; NaN means "
         "unsupported. Not independent optical measurements of every movie frame."),
     "movie_frame_numbers": (np.int64,
@@ -518,7 +518,7 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_in
         warnings.warn(message, RuntimeWarning, stacklevel=2)
         recovery_warnings.append(message)
     frame_metadata = {
-        "clock_reference": "seconds relative to first SLAP2 DO0 pulse (normalized HARP)",
+        "clock_reference": "seconds relative to first recorded SLAP2 DO0 pulse (normalized HARP)",
         "mapping_method": "piecewise_linear_matched_photodiode_anchors",
         "frame_identity": "original 1-based MovieFrame-N logger counter; decoded MP4 index unverified",
         "accuracy_note": "Aligned onset estimates, not per-frame optical measurements; affine residuals are not timing uncertainty.",

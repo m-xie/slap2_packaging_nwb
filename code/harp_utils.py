@@ -75,6 +75,11 @@ def extract_harp(harp_path, expected_n_trials=None):
     grating_signal = reader.PulseDO2.read()["PulseDO2"].to_numpy()
     grating_times = reader.PulseDO2.read()["PulseDO2"].index.to_numpy()
 
+    # DigitalInputState is event-driven; its first record need not coincide
+    # with HARP recording onset. Use the earliest observed analog/digital time.
+    recording_start_time = min(
+        times[0] for times in (analog_times, slap2_cycle_clock_times) if len(times)
+    )
     # All times are normalized to the first SLAP2 start pulse
     time_reference = slap2_start_times[0]
     slap2_cycle_clock_times   -= time_reference
@@ -96,6 +101,7 @@ def extract_harp(harp_path, expected_n_trials=None):
         "grating_signal": grating_signal,
         "grating_times": grating_times,
         "time_reference": time_reference,
+        "recording_start_time": float(recording_start_time - time_reference),
         # Aliases kept for backward compatibility
         "normalized_start_gratings": grating_times,
         "normalized_slap2_start": slap2_start_times,
@@ -143,7 +149,8 @@ def trim_leading_trial_pulse_artifact(harp_data):
         "slap2_end_times",
         "normalized_slap2_end",
     ):
-        trimmed[key] = harp_data[key][1:]
+        if key in harp_data:
+            trimmed[key] = harp_data[key][1:]
 
     # DO2 events emitted by the aborted acquisition must be removed with its
     # DO0/DO1 pair or the legacy stimulus table gains an unmatched onset.
@@ -169,6 +176,81 @@ def trim_leading_trial_pulse_artifact(harp_data):
         stacklevel=2,
     )
     return trimmed
+
+
+def qc_continuous_harp(harp_data):
+    """Validate continuous HARP inputs without modifying data or returning metrics.
+
+    Run shared startup trimming first. Require one finite start and an optional
+    finite stop after it. Preserve the original origin and all DI3/analog data.
+    """
+    starts = np.asarray(harp_data['normalized_slap2_start'], dtype=float)
+    ends = np.asarray(harp_data['normalized_slap2_end'], dtype=float)
+    if starts.shape != (1,) or ends.shape not in ((0,), (1,)):
+        raise ValueError(
+            "Continuous acquisition requires exactly one retained SLAP2 start and "
+            f"at most one retained stop after startup trimming; got {starts.size} starts "
+            f"and {ends.size} stops."
+        )
+    if not np.isfinite(starts[0]) or not np.isfinite(ends).all():
+        raise ValueError("Continuous SLAP2 start and stop must be finite")
+    if ends.size and ends[0] <= starts[0]:
+        raise ValueError("Continuous SLAP2 stop must be after its start")
+    groups = (
+        ('slap2_start_times', 'normalized_slap2_start'),
+        ('slap2_end_times', 'normalized_slap2_end'),
+        ('slap2_cycle_clock_times', 'normalized_slap2_cycle_clock_times'),
+        ('analog_times', 'normalized_analog_times'),
+        ('grating_times', 'normalized_start_gratings'),
+    )
+    for aliases in groups:
+        present = [key for key in aliases if key in harp_data]
+        if not present:
+            continue
+        source = np.asarray(harp_data[present[0]])
+        if any(not np.array_equal(source, harp_data[key]) for key in present[1:]):
+            raise ValueError(f"Inconsistent HARP timestamp aliases: {aliases}")
+
+
+def trim_unterminated_harp_trial(harp_data):
+    """Exclude an unterminated trailing trial unless it may be continuous.
+
+    A sole DO0 without DO1 is preserved provisionally for later continuous
+    inference. An unmatched final DO0 in a multi-trial session is removed.
+    Return (harp_data, exclude_final_trial) without changing the clock origin.
+    """
+    starts = harp_data['normalized_slap2_start']
+    ends = harp_data['normalized_slap2_end']
+    excluded_trailing_trials = 0
+    # Preserve the only acquisition until legacy continuous inference runs.
+    if len(starts) == 1 and len(ends) == 0:
+        return dict(harp_data), False
+    if len(starts) == len(ends) + 1 and starts[-1] > ends[-1]:
+        excluded_trailing_trials = 1
+    elif len(starts) != len(ends):
+        raise ValueError(
+            f"Unsupported SLAP2 trial pulse mismatch: {len(starts)} starts and "
+            f"{len(ends)} ends."
+        )
+
+    trimmed = dict(harp_data)
+    if not excluded_trailing_trials:
+        return trimmed, False
+
+    for key in ('slap2_start_signal', 'slap2_start_times', 'normalized_slap2_start'):
+        trimmed[key] = harp_data[key][:-1]
+    last_complete_end = ends[-1]
+    keep_clock = harp_data['slap2_cycle_clock_times'] <= last_complete_end
+    trimmed['slap2_cycle_clock_signal'] = harp_data['slap2_cycle_clock_signal'][keep_clock]
+    trimmed['slap2_cycle_clock_times'] = harp_data['slap2_cycle_clock_times'][keep_clock]
+    trimmed['normalized_slap2_cycle_clock_times'] = trimmed['slap2_cycle_clock_times']
+    warnings.warn(
+        "The final SLAP2 trial has a start pulse but no end pulse; excluding the "
+        "final trial from fluorescence packaging.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return trimmed, True
 
 
 def get_concatenated_timestamps(trace, trial_start_idxs, harp_data):
