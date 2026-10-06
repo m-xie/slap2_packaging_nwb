@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -158,9 +159,20 @@ def extract_harp_photodiode_transitions(harp_data):
         analog_times.ndim != 1 or photodiode.shape != analog_times.shape
         or len(analog_times) < 3
         or not np.isfinite(analog_times).all() or not np.isfinite(photodiode).all()
-        or np.any(np.diff(analog_times) <= 0)
     ):
-        raise ValueError("HARP analog samples must be finite paired arrays with strictly increasing times (at least 3 samples)")
+        raise ValueError("HARP analog samples must be finite paired arrays (at least 3 samples)")
+    time_diffs = np.diff(analog_times)
+    non_increasing = np.flatnonzero(time_diffs <= 0)
+    if non_increasing.size:
+        warnings.warn(
+            f"HARP analog timestamps are not strictly increasing: {non_increasing.size} "
+            f"non-increasing steps; first at sample index {non_increasing[0] + 1} "
+            f"(zero-based), minimum delta {time_diffs.min():.9f} s. "
+            "Preserving recorded timestamps and sample order; photodiode anchors "
+            "must still be strictly increasing for alignment.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     # Percentiles are robust to brief transitions and isolated analog outliers.
     low, high = np.quantile(photodiode, (0.1, 0.9))
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:

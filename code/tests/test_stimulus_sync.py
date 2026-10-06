@@ -105,6 +105,23 @@ class StimulusSyncTests(unittest.TestCase):
         np.testing.assert_array_equal(times, np.arange(-3.0, 7.0))
         np.testing.assert_array_equal(signal, [0, 1, 0, 1, 0, 1, 0, 1, 0, 0])
 
+    def test_non_increasing_analog_times_warn_without_changing_samples(self):
+        for times in ([0, 1, 0.5, 3, 4, 5], [0, 1, 1, 3, 4, 5]):
+            with self.subTest(times=times):
+                times = np.array(times, dtype=float)
+                signal = np.array([0, 1, 0, 1, 0, 0])
+                times.setflags(write=False)
+                signal.setflags(write=False)
+                with self.assertWarnsRegex(RuntimeWarning, "1 non-increasing steps; first at sample index 2"):
+                    edges, states, _ = extract_harp_photodiode_transitions(
+                        {"analog_times": times, "photodiode": signal})
+                np.testing.assert_array_equal(edges, times[1:5])
+                np.testing.assert_array_equal(states, [True, False, True, False])
+                logger = LoggerEvents(Path("clock.csv"), 0, np.array([]),
+                                      np.arange(4), states)
+                with self.assertRaisesRegex(ValueError, "HARP photodiode transitions"):
+                    align_logger_frames_to_harp(logger, edges, states)
+
     def test_one_to_one_retains_every_edge_despite_large_timing_steps(self):
         frames = np.arange(100, 2100, 10)
         states = np.arange(len(frames)) % 2 == 0
