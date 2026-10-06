@@ -81,6 +81,33 @@ class ActivityAlignmentTests(unittest.TestCase):
         np.testing.assert_allclose(aligned[0], aligned[1], atol=1e-10)
         np.testing.assert_allclose(aligned[0], condition.axis * 30, atol=1e-10)
 
+    def test_shared_movie_timestamps_preserve_content_and_activity(self):
+        times = np.array([1., 1., 1 + 2/30])
+        groups = activity.build_conditions(pd.DataFrame([movie(1., times)]), pd.DataFrame(), 120)
+        condition = groups[0][0]
+        np.testing.assert_allclose(condition.targets[0, ::4], times)
+        np.testing.assert_allclose(condition.targets[0, :5], 1.)
+        self.assertAlmostEqual(condition.targets[0, 6], 1 + 1/30)
+        self.assertTrue(np.isfinite(condition.targets).all())
+        timestamps = np.linspace(1., 1.1, 121)
+        aligned = activity.align_trace(groups, timestamps, timestamps * 2, 120)[0][0]
+        np.testing.assert_allclose(aligned, condition.targets * 2)
+
+    def test_shared_movie_timestamps_do_not_bridge_unsupported_or_partial_coverage(self):
+        row = movie(1., [1., 1., 1., 1.], partial=True, statuses=[0, 1, 3, 2])
+        targets = activity.build_conditions(pd.DataFrame([row]), pd.DataFrame(), 120)[0][0].targets[0]
+        np.testing.assert_allclose(targets[:5], 1.)
+        self.assertTrue(np.isnan(targets[5:12]).all())
+        self.assertEqual(targets[12], 1.)
+        self.assertTrue(np.isnan(targets[13:]).all())
+
+    def test_decreasing_supported_movie_timestamps_still_rejected(self):
+        for times, statuses in (([1., 1.05, 1.04], [0, 1, 2]),
+                                ([1.05, np.nan, 1.04], [0, 3, 1])):
+            with self.subTest(times=times), self.assertRaisesRegex(ValueError, "must not decrease"):
+                activity.build_conditions(pd.DataFrame([movie(1., times, statuses=statuses)]),
+                                          pd.DataFrame(), 120)
+
     def test_partial_movie_nan_tail_and_unsupported_interior_preserved(self):
         complete = movie(1.)
         partial = movie(4., [4., np.nan, 4 + 2/30], partial=True, statuses=[0, 3, 1])
@@ -159,7 +186,8 @@ class ActivityNWBTests(unittest.TestCase):
             blocks.add_column(col, col)
         for col in ("movie_frame_numbers", "movie_frame_timestamps", "movie_frame_timing_status"):
             blocks.add_column(col, col, index=True)
-        for row in (movie(1.), movie(2., partial=True), movie(3., name=activity.ZEBRA[0][0])):
+        shared = movie(1., [1., 1., 1 + 2/30, 1 + 3/30, 1 + 4/30, 1 + 5/30])
+        for row in (shared, movie(2., partial=True), movie(3., name=activity.ZEBRA[0][0])):
             blocks.add_row(**row)
         gratings = nwb.create_time_intervals(name="gratings", description="gratings")
         for col in ("logger_orientation", "is_partial"):

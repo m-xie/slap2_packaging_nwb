@@ -103,8 +103,11 @@ def _movie_targets(row, content_frames):
         raise ValueError("Movie frame numbers must be positive integers")
     times[(status == 3) | (times < row.start_time) | (times > row.stop_time)] = np.nan
     finite = times[np.isfinite(times)]
-    if np.any(np.diff(finite) <= 0):
-        raise ValueError("Supported movie frame timestamps must increase")
+    # Content events can share a display frame and therefore a timestamp.
+    # Interpolation uses strictly increasing content numbers as coordinates,
+    # not these times; preserve ties without inventing distinct visual onsets.
+    if np.any(np.diff(finite) < 0):
+        raise ValueError("Supported movie frame timestamps must not decrease")
     # A complete interval supplies the end of its last content frame. Do not
     # invent this boundary for a censored trial or unsupported final frame.
     if not row.is_partial and np.isfinite(times[-1]) and row.stop_time > times[-1]:
