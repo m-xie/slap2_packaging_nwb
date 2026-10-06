@@ -159,6 +159,64 @@ class StimulusSyncTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "count mismatch: logger=3, HARP=4"):
             align_logger_frames_to_harp(logger, times, states)
 
+    def test_undetected_one_frame_terminal_blip_is_reported_and_removed(self):
+        rows = [(0, 0, "STARTSLAP"), (10, 0, "Photodiode-1"),
+                (20, 0, "Photodiode-0"), (30, 0, "Photodiode-1"),
+                (40, 0, "Photodiode-0"), (55, 0, "Photodiode-1"),
+                (55, 0, "END"), (55, 0, "EndFrame")]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "logger.csv"
+            pd.DataFrame(rows, columns=["Frame", "Timestamp", "Value"]).to_csv(path, index=False)
+            logger = extract_logger_events(path, stimulus_frames=[], initial_low_baseline=True,
+                                           terminal_low_after_end_frame=True)
+        original = logger.transition_frames.copy()
+        times = np.array([1., 2., 3., 4.])
+        states = np.array([True, False, True, False])
+        for array in (logger.transition_frames, logger.transition_states, times, states):
+            array.setflags(write=False)
+        with patch("builtins.print") as output:
+            frames, measured, qc = align_logger_frames_to_harp(logger, times, states)
+        np.testing.assert_array_equal(frames, [10, 20, 30, 40])
+        np.testing.assert_array_equal(measured, times)
+        np.testing.assert_array_equal(logger.transition_frames, original)
+        self.assertEqual(qc.logger_transition_count, 6)
+        self.assertEqual(qc.harp_transition_count, 4)
+        self.assertEqual(qc.matched_transition_count, 4)
+        self.assertEqual(qc.undetected_terminal_blip_frames, (55, 56))
+        self.assertEqual(qc.matching_method, "one_to_one_without_undetected_terminal_blip")
+        output.assert_called_once()
+        self.assertIn("high at EndFrame 55, inferred low at frame 56", output.call_args.args[0])
+
+    def test_detected_terminal_blip_is_retained(self):
+        logger = LoggerEvents(Path("tail.csv"), 0, np.array([]),
+                              np.array([10, 20, 30, 40, 55, 56]),
+                              np.array([1, 0, 1, 0, 1, 0]), terminal_low_frame=56)
+        with patch("builtins.print") as output:
+            frames, _, qc = align_logger_frames_to_harp(
+                logger, logger.transition_frames / 60, logger.transition_states)
+        np.testing.assert_array_equal(frames, logger.transition_frames)
+        self.assertEqual(qc.undetected_terminal_blip_frames, ())
+        self.assertEqual(qc.matching_method, "strict_one_to_one")
+        output.assert_not_called()
+
+    def test_terminal_blip_exception_rejects_other_mismatches(self):
+        for frames, states, terminal, harp_states in (
+            ([10, 20, 30, 40, 55, 57], [1, 0, 1, 0, 1, 0], 57, [1, 0, 1, 0]),
+            ([10, 20, 30, 40, 55, 56], [1, 0, 1, 0, 1, 0], None, [1, 0, 1, 0]),
+            ([10, 20, 30, 40, 55, 56], [1, 0, 1, 0, 1, 0], 57, [1, 0, 1, 0]),
+            ([10, 20, 30, 40, 55, 56], [1, 0, 1, 0, 1, 0], 56, [0, 1, 0, 1]),
+            ([10, 20, 30, 40, 55, 56], [0, 1, 0, 1, 0, 1], 56, [0, 1, 0, 1]),
+            ([10, 20, 30, 40, 55, 56], [1, 0, 1, 1, 1, 0], 56, [1, 0, 1, 1]),
+            ([10, 20, 30, 40, 55, 56], [1, 0, 1, 0, 1, 0], 56, [1, 0, 1]),
+        ):
+            with self.subTest(frames=frames, states=states, terminal=terminal, harp_states=harp_states):
+                logger = LoggerEvents(Path("tail.csv"), 0, np.array([]),
+                                      np.array(frames), np.array(states), terminal_low_frame=terminal)
+                with patch("builtins.print") as output:
+                    with self.assertRaisesRegex(ValueError, "count mismatch"):
+                        align_logger_frames_to_harp(logger, np.arange(len(harp_states)), harp_states)
+                output.assert_not_called()
+
     def test_invalid_transition_arrays_fail_without_filtering(self):
         logger = LoggerEvents(Path("invalid.csv"), 0, np.array([]),
                               np.array([10, 20, 30]), np.array([1, 0, 1]))

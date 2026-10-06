@@ -20,7 +20,7 @@ class LoggerEvents:
 
 @dataclass(frozen=True)
 class AlignmentQC:
-    """Strict pairing metadata with descriptive, non-gating timing statistics.
+    """Pairing metadata with descriptive, non-gating timing statistics.
 
     frame_rate_hz is the endpoint-to-endpoint average rate. Residual fields
     describe departures from that endpoint line, NOT a fitted alignment or
@@ -37,6 +37,7 @@ class AlignmentQC:
     maximum_absolute_residual_ms: float
     matching_method: str = "strict_one_to_one"
     residual_reference: str = "endpoint_secant_descriptive_only"
+    undetected_terminal_blip_frames: tuple[int, ...] = ()
 
 
 def select_stimulus_logger(candidate_paths):
@@ -192,9 +193,13 @@ def align_logger_frames_to_harp(
     harp_times,
     harp_states,
 ):
-    """Pair all logger and measured photodiode edges one-to-one, in order.
+    """Pair logger and measured photodiode edges one-to-one, in order.
 
-    Counts and polarities must agree exactly. No fit, tolerance, event search,
+    A one-frame high at EndFrame and its inferred low may be undetected by
+    HARP. Only when these are the two excess logger edges and the retained
+    polarities agree, omit that terminal pair and report it. Never drop HARP
+    edges or modify the source logger. Otherwise counts must agree exactly.
+    No fit, tolerance, event search,
     outlier rejection, or cropping selects the anchors. Their original frames
     and measured HARP times define the downstream piecewise-linear mapping.
     """
@@ -213,12 +218,26 @@ def align_logger_frames_to_harp(
             or not np.isin(states, (False, True)).all()
         ):
             raise ValueError(f"{label} photodiode transitions must have finite strictly increasing coordinates and paired binary states")
+    undetected_terminal_blip_frames = ()
+    if (
+        len(anchor_frames) == len(anchor_times) + 2
+        and len(anchor_times) >= 2
+        and getattr(logger_data, "terminal_low_frame", None) == anchor_frames[-1]
+        and anchor_frames[-1] - anchor_frames[-2] == 1
+        and np.array_equal(logger_states[-2:], [True, False])
+        and np.array_equal(logger_states[:-2], harp_states)
+        and np.all(logger_states[1:] != logger_states[:-1])
+    ):
+        undetected_terminal_blip_frames = tuple(int(frame) for frame in anchor_frames[-2:])
+        anchor_frames = anchor_frames[:-2]
+        logger_states = logger_states[:-2]
     if len(anchor_frames) != len(anchor_times):
         raise ValueError(
             "Photodiode transition count mismatch: "
             f"logger={len(anchor_frames)}, HARP={len(anchor_times)}. "
             "Strict one-to-one pairing requires equal counts; all detected "
-            "transitions are retained without DO0/DO1 cropping or edge skipping."
+            "transitions are retained without DO0/DO1 cropping or edge skipping, "
+            "except an undetected one-frame terminal high blip at EndFrame."
         )
     if len(anchor_frames) < 2:
         raise ValueError("At least two paired photodiode transitions are required")
@@ -233,6 +252,16 @@ def align_logger_frames_to_harp(
         )
     if np.any(logger_states[1:] == logger_states[:-1]):
         raise ValueError("Photodiode transition states must alternate; repeated states are not transitions")
+
+    if undetected_terminal_blip_frames:
+        high_frame, low_frame = undetected_terminal_blip_frames
+        print(
+            "WARNING: HARP did not detect the final one-frame photodiode blip: "
+            f"high at EndFrame {high_frame}, inferred low at frame {low_frame}. "
+            "Removed both frames from the alignment anchors; "
+            f"retaining {len(anchor_frames)} paired anchors. "
+            "No HARP edges were removed or timestamps fabricated."
+        )
 
     # Descriptive metadata only: departures from the line joining the first
     # and last anchors. No line is fitted and these values cannot reject data.
@@ -251,6 +280,11 @@ def align_logger_frames_to_harp(
             np.quantile(absolute_residuals, 0.95) * 1000
         ),
         maximum_absolute_residual_ms=float(np.max(absolute_residuals) * 1000),
+        matching_method=(
+            "one_to_one_without_undetected_terminal_blip"
+            if undetected_terminal_blip_frames else "strict_one_to_one"
+        ),
+        undetected_terminal_blip_frames=undetected_terminal_blip_frames,
     )
     return anchor_frames, anchor_times, qc
 
