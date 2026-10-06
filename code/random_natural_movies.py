@@ -19,7 +19,7 @@ from qc.random_natural_movies_sync_qc import plot_photodiode_sync
 
 LOGGER_FORMAT = "Random Natural Movies"
 GRATING_ORIENTATIONS = frozenset((0, 45, 90, 135, 180, 225, 270, 315, 359))
-MAX_ENDPOINT_EXTRAPOLATION_FRAMES = 10
+MAX_ENDPOINT_EXTRAPOLATION_FRAMES = 20
 # Quality policy, not an accuracy guarantee: reject interpolation across more
 # than three typical *logged* photodiode periods (not matched-anchor periods).
 MAX_INTERPOLATION_GAP_FACTOR = 3.0
