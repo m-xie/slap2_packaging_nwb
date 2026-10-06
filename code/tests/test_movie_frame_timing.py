@@ -29,6 +29,10 @@ def synthetic_harp(logger, *, slope=1.0008 / 60, offset=0.023, sample_period=0.0
     states = diode.Value.eq("Photodiode-1").to_numpy()
     changes = np.flatnonzero(states[1:] != states[:-1]) + 1
     edge_frames = diode.Frame.to_numpy()[changes]
+    # Playback shutdown clears a high patch on the frame after EndFrame.
+    end_frames = logger.loc[logger.Value.eq("EndFrame"), "Frame"]
+    if len(end_frames) and states[-1]:
+        edge_frames = np.r_[edge_frames, int(end_frames.iloc[-1]) + 1]
     edge_times = offset + slope * (edge_frames - reference)
     recording_end = offset + slope * (logger.Frame.max() - reference) + 0.1
     analog_times = np.arange(0, recording_end, sample_period)
@@ -158,7 +162,7 @@ class MovieFrameSynchronizationTests(unittest.TestCase):
         slope, offset, sample_period = 1.0008 / 60, 0.023, 0.0001
         harp, edge_frames, edge_times = synthetic_harp(self.logger, slope=slope, offset=offset)
         saved_table = self.table.copy(deep=True)
-        # Exercise both DO1 cutoff and analog-tail fallback with real matching.
+        # DO markers must not affect photodiode extraction or pairing.
         for has_do1 in (True, False):
             with self.subTest(has_do1=has_do1):
                 data = dict(harp)
@@ -211,6 +215,49 @@ class MovieFrameSynchronizationTests(unittest.TestCase):
                 self.assertEqual(timing["harp_time_reference_seconds"], 12345.0)
                 self.assertEqual(timing["status_codes"], {"anchored": 0, "interpolated": 1, "extrapolated": 2, "unsupported": 3})
         pd.testing.assert_frame_equal(self.table, saved_table)
+
+    def test_do_markers_inside_stimulus_do_not_crop_any_anchors(self):
+        self.write_logger()
+        harp, edge_frames, edge_times = synthetic_harp(self.logger)
+        harp["normalized_slap2_start"] = np.array([edge_times[5]])
+        harp["normalized_slap2_end"] = np.array([edge_times[-5]])
+        blocks, _, metadata = movies.synchronize_presentations(self.table, self.path, harp)
+        alignment = blocks.attrs["movie_frame_alignment"]
+        np.testing.assert_array_equal(alignment["anchor_frames"], edge_frames)
+        np.testing.assert_allclose(alignment["anchor_times"], edge_times, atol=0.0001, rtol=0)
+        self.assertEqual(metadata["matching_method"], "strict_one_to_one")
+        self.assertEqual(metadata["photodiode_signal_window"], "full_analog_recording_no_DO0_DO1_cropping")
+        self.assertEqual(metadata["photodiode_threshold_method"], "full_recording_10_90_percentile_midpoint")
+
+    def test_high_end_frame_pairs_measured_terminal_fall_without_extrapolation(self):
+        # A single movie ends at frame 18; keep the final patch high until the
+        # EndFrame-implied fall at frame 19 in the physical recording.
+        self.table, self.logger = example_session(("movie",))
+        self.logger.loc[self.logger.Frame.eq(18) & self.logger.Value.str.startswith("Photodiode-"), "Value"] = "Photodiode-1"
+        self.write_logger()
+        harp, frames, times = synthetic_harp(self.logger)
+        harp["normalized_slap2_end"] = np.array([times[-1] - 0.01])
+        blocks, _, metadata = movies.synchronize_presentations(self.table, self.path, harp)
+        alignment = blocks.attrs["movie_frame_alignment"]
+        np.testing.assert_array_equal(alignment["anchor_frames"], frames)
+        np.testing.assert_allclose(alignment["anchor_times"], times, atol=0.0001, rtol=0)
+        self.assertEqual(frames[-1], 19)
+        self.assertTrue(metadata["terminal_photodiode_transition_inferred"])
+        self.assertEqual(metadata["terminal_photodiode_transition_frame"], 19)
+        self.assertEqual(metadata["logger_transition_count"], metadata["harp_transition_count"])
+        self.assertEqual(blocks.iloc[-1].stop_frame, 18)
+        self.assertEqual(metadata["extrapolated_boundary_count"], 0)
+
+    def test_extra_tail_edge_fails_and_still_writes_raw_edge_qc(self):
+        self.write_logger()
+        harp, _, _ = synthetic_harp(self.logger)
+        # Append a physical state change beyond the original DO1 bound.
+        harp["analog_times"] = np.r_[harp["analog_times"], harp["analog_times"][-1] + 0.01]
+        harp["photodiode"] = np.r_[harp["photodiode"], 0.2 if harp["photodiode"][-1] > 1 else 3.7]
+        output = self.path.parent / "mismatch.png"
+        with self.assertRaisesRegex(ValueError, "count mismatch"):
+            movies.synchronize_presentations(self.table, self.path, harp, photodiode_qc_path=output)
+        self.assertTrue(output.is_file())
 
     def test_explicit_gap_override_marks_unanchored_frames_unsupported(self):
         self.write_logger()

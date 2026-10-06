@@ -15,8 +15,8 @@ def plot_photodiode_sync(logger_data, harp_times, output_path):
     Align the first pair in the first panel and the last pair in the last panel.
     No matched anchors, fitted frame rate, logger timestamps, or stretching are
     used. Expand the display limits if needed to show all selected logger edges;
-    this does not change the frame-to-second conversion. Analog counts retain
-    the synchronization acquisition cutoff, not the pre-stimulus baseline.
+    this does not change the frame-to-second conversion. Analog counts include
+    all detected edges across the recording, without any DO0/DO1 cutoff.
     """
     frame_edges = np.asarray(logger_data.transition_frames, dtype=float)
     time_edges = np.asarray(harp_times, dtype=float)

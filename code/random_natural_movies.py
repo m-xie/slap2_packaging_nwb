@@ -472,14 +472,17 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_in
     logger_data = stimulus_sync.extract_logger_events(
         logger_path, stimulus_frames=blocks["start_frame"].to_numpy(),
         initial_low_baseline=True,
+        terminal_low_after_end_frame=True,
     )
     harp_times, harp_states, _ = stimulus_sync.extract_harp_photodiode_transitions(harp_data)
+    # Keep raw-edge diagnostics available even when strict pairing rejects a
+    # count/polarity mismatch. This plot never selects synchronization anchors.
+    if photodiode_qc_path is not None:
+        plot_photodiode_sync(logger_data, harp_times, photodiode_qc_path)
     anchor_frames, anchor_times, qc = stimulus_sync.align_logger_frames_to_harp(
         logger_data, harp_times, harp_states,
     )
     anchor_frames, anchor_times = _validate_frame_anchors(anchor_frames, anchor_times)
-    if photodiode_qc_path is not None:
-        plot_photodiode_sync(logger_data, harp_times, photodiode_qc_path)
     logged_frame_count = int(blocks["movie_frame_count"].sum())
     if maximum_interpolation_gap_frames is None:
         maximum_interpolation_gap_frames = MAX_INTERPOLATION_GAP_FACTOR * float(
@@ -551,7 +554,7 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_in
         "clock_reference": "seconds relative to first recorded SLAP2 DO0 pulse (normalized HARP)",
         "mapping_method": "piecewise_linear_matched_photodiode_anchors",
         "frame_identity": "original 1-based MovieFrame-N logger counter; decoded MP4 index unverified",
-        "accuracy_note": "Aligned onset estimates, not per-frame optical measurements; affine residuals are not timing uncertainty.",
+        "accuracy_note": "Aligned onset estimates, not per-frame optical measurements; descriptive timing residuals are not timing uncertainty and do not select anchors.",
         "maximum_endpoint_extrapolation_frames": MAX_ENDPOINT_EXTRAPOLATION_FRAMES,
         "maximum_interpolation_gap_frames": float(maximum_interpolation_gap_frames),
         "default_gap_policy": "3 times median logger photodiode transition spacing",
@@ -585,7 +588,11 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_in
         "has_session_end": has_session_end,
         "recovery_warnings": recovery_warnings,
         "initial_photodiode_baseline": "low",
-        "photodiode_threshold_method": "acquisition_10_90_percentile_midpoint",
+        "terminal_photodiode_rule": "if_high_next_frame_after_EndFrame_is_low",
+        "terminal_photodiode_transition_inferred": logger_data.terminal_low_frame is not None,
+        "terminal_photodiode_transition_frame": logger_data.terminal_low_frame,
+        "photodiode_threshold_method": "full_recording_10_90_percentile_midpoint",
+        "photodiode_signal_window": "full_analog_recording_no_DO0_DO1_cropping",
         "movie_presentation_count": int(blocks["TrialType"].eq("movie").sum()),
         "grating_presentation_count": len(gratings),
         "blank_presentation_count": int(gratings["is_blank"].sum()),

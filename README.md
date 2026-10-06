@@ -40,7 +40,8 @@ leaves only the original soma F series, without inventing a baseline.
 
 Select **Random Natural Movies** in the capsule's **Logger Format** setting
 (`--logger_format`). The other logger-format selections retain their existing
-stimulus parsing, timing fallback, table names, and QC behavior.
+stimulus parsing, timing fallback, table names, and QC behavior. The shared
+photodiode alignment uses the strict transition-pairing contract below.
 
 The adapter requires a stimulus table with `TextureName`, `TrialType`,
 `TrialDuration`, `ExtentX`, and `ExtentY`, and a BonVision logger with `Frame`,
@@ -77,6 +78,37 @@ row identifiers are preserved even when only a prefix can be synchronized.
 
 ### Timing and validation
 
+Logger photodiode transitions and measured HARP analog transitions are paired
+**one-to-one in recorded order**. Counts must be exactly equal and the polarity
+of every pair must agree. No global affine fit, event search, residual gate,
+outlier rejection, or edge skipping selects the anchors. Count/polarity
+mismatches fail explicitly; no leading or shutdown edges are discarded to
+force agreement. For Random Natural Movies, `EndFrame` declares that the
+**next frame is low**: if the last explicit photodiode state is high, an implied
+falling transition at `EndFrame + 1` is included in the logger sequence and
+paired with the measured HARP fall. An already-low ending adds nothing, and
+no terminal state is inferred without `EndFrame` (an `END` marker alone is
+insufficient). Source logger rows and stimulus stop frames are not changed.
+Provenance records the rule, whether a transition was inferred, and its frame.
+Equal counts and polarities are required, but cannot alone
+prove that two missing/extra edges have not canceled; raw-edge QC remains
+important.
+
+The photodiode threshold is the midpoint of the 10th/90th percentiles of the
+**full analog recording**, and all threshold crossings are retained. No analog
+samples or transitions are cropped to DO0/DO1 or DI3 bounds. DO0/DO1 are not
+strict optical boundaries. If baseline dominates a recording and the two
+levels cannot be reliably separated, inspect the signal/threshold rather than
+trimming edges to achieve a desired count. Existing initial erroneous DO-pair
+cleanup and the original HARP time origin remain unchanged.
+
+Every paired logger frame and measured HARP time is an interpolation anchor.
+QC `matching_method` is `strict_one_to_one`. `frame_rate_hz` describes the
+endpoint-to-endpoint average rate; the retained residual fields describe
+departures from the endpoint secant (`endpoint_secant_descriptive_only`). These
+statistics are not fitted alignment parameters, do not gate matching, and do
+not measure timing accuracy.
+
 #### Per-movie frame timing
 
 Each movie row in `stimulus_blocks` now contains five equal-length NWB ragged
@@ -105,11 +137,11 @@ Frame timestamps use the **same matched photodiode anchors and piecewise-linear
 map as interval boundaries**, computed once per session. Exact matched anchors
 receive status 0. Interpolation is unsupported when the surrounding anchor gap
 exceeds **three times the median logger photodiode-transition spacing**. This
-threshold is based on all logged transitions, not the potentially sparse matched
-subset; it is a coverage heuristic, not an accuracy guarantee. The Python
+threshold is based on all logged transitions; strict pairing retains every
+transition as an anchor. It is a coverage heuristic, not an accuracy guarantee. The Python
 `synchronize_presentations()` API permits an explicit positive
 `maximum_interpolation_gap_frames` override. Endpoint extrapolation remains
-limited to two display frames and receives status 2.
+limited to ten display frames and receives status 2.
 
 For interrupted recordings, existing interval recovery still omits whole blocks
 starting beyond usable coverage. **All events within retained blocks are kept**,
@@ -137,13 +169,15 @@ For Random Natural Movies, the synchronization QC folder contains only two PNGs:
 	limits expand if necessary to keep all selected edges visible without changing
 	the conversion. Short recordings have overlapping windows; insufficient logger
 	edges are explicitly noted. Total analog and BonVision edge counts remain in
-	the title. Analog inputs use the synchronization acquisition cutoff, excluding
-	the pre-stimulus baseline. This ordinal comparison is for visualization only,
-	not the mapping used for saved stimulus timestamps.
+	the title. Analog inputs include every detected edge in the full recording,
+	including edges before DO0 and after DO1. This fixed-rate overlay is for
+	visualization only; saved timestamps interpolate the strict one-to-one
+	measured edge pairs. The plot is also saved before reporting pairing errors.
 	For Random Natural Movies, the first logged high photodiode state always
 	counts as a rising edge at its own frame, even if it is not the `STARTSLAP`
-	frame. An initial low state and repeated states do not add edges; the final
-	state adds an edge only if it changes from the preceding state.
+	frame. An initial low state and repeated states do not add edges. If the
+	final state is high, `EndFrame` implies the falling edge at `EndFrame + 1`;
+	that implied transition is included in the logger count and overlay.
 - **SLAP2 / DI3 synchronization:** total raw SLAP2 cycles per DMD, the total
 	detected DI3 pulse count, and a histogram of consecutive DI3 intervals in ms.
 	DI3 is compared with DMD1 (not the sum of both DMDs). All detected pulses,
@@ -156,8 +190,8 @@ longer emitted for this path. Legacy synchronization QC outputs are unchanged.
 **Precision caveat:** timestamps are photodiode-aligned onset estimates, not
 independent optical measurements of every movie frame. Logger/render ordering,
 display scanout, ADC sampling, and edge-matching ambiguity can limit accuracy.
-The existing session-level p95 affine residual gate is 40 ms; passing it does
-not establish sub-frame precision. Zero residual at an interpolation anchor is
+There is no session-level affine residual gate or residual-based edge rejection.
+Equal transition counts do not establish sub-frame precision. Zero residual at an interpolation anchor is
 not a timing-accuracy measurement. Validate logger event semantics and optical
 timing before interpreting these counters as exact MP4-frame onsets.
 

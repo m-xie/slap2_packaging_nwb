@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from stimulus_sync import (
+    LoggerEvents,
     align_logger_frames_to_harp,
     extract_harp_photodiode_transitions,
     extract_logger_events,
@@ -65,7 +66,7 @@ class StimulusSyncTests(unittest.TestCase):
             result.transition_states, [False, True, False, True]
         )
 
-    def test_alignment_tolerates_missing_and_extra_transitions(self):
+    def test_alignment_rejects_missing_and_extra_transitions(self):
         rng = np.random.default_rng(12)
         run_lengths = rng.integers(4, 45, size=180)
         frames = np.cumsum(run_lengths) + 100
@@ -85,14 +86,70 @@ class StimulusSyncTests(unittest.TestCase):
         harp_times = np.insert(harp_times, 75, harp_times[74] + 0.08)
         harp_states = np.insert(states, 75, ~states[74])
 
-        anchor_frames, anchor_times, qc = align_logger_frames_to_harp(
-            logger_data, harp_times, harp_states
-        )
+        with self.assertRaisesRegex(ValueError, "count mismatch: logger=178, HARP=181"):
+            align_logger_frames_to_harp(logger_data, harp_times, harp_states)
 
-        self.assertGreater(qc.matched_transition_count, 160)
-        self.assertAlmostEqual(qc.frame_rate_hz, 59.997, places=2)
-        self.assertLess(qc.p95_absolute_residual_ms, 10)
-        self.assertEqual(len(anchor_frames), len(anchor_times))
+    def test_full_analog_edges_are_independent_of_do_bounds(self):
+        times = np.arange(-3.0, 7.0)
+        signal = np.array([0, 1, 0, 1, 0, 1, 0, 1, 0, 0])
+        for markers in ({}, {"normalized_slap2_start": np.array([0.0]),
+                             "normalized_slap2_end": np.array([2.0])},
+                        {"normalized_slap2_start": np.array([100.0]),
+                         "normalized_slap2_end": np.array([])}):
+            with self.subTest(markers=markers):
+                result, states, threshold = extract_harp_photodiode_transitions(
+                    {"analog_times": times, "photodiode": signal, **markers})
+                np.testing.assert_array_equal(result, times[1:9])
+                np.testing.assert_array_equal(states, signal[1:9].astype(bool))
+                self.assertEqual(threshold, 0.5)
+        np.testing.assert_array_equal(times, np.arange(-3.0, 7.0))
+        np.testing.assert_array_equal(signal, [0, 1, 0, 1, 0, 1, 0, 1, 0, 0])
+
+    def test_one_to_one_retains_every_edge_despite_large_timing_steps(self):
+        frames = np.arange(100, 2100, 10)
+        states = np.arange(len(frames)) % 2 == 0
+        times = frames / 60 + 0.25
+        times[50:] += 0.5
+        times[100:] += 0.75
+        logger = LoggerEvents(Path("steps.csv"), 99999, np.array([]), frames, states)
+        for array in (frames, times, states):
+            array.setflags(write=False)
+        with patch("stimulus_sync.np.polyfit", side_effect=AssertionError("No fit should run")):
+            anchor_frames, anchor_times, qc = align_logger_frames_to_harp(logger, times, states)
+        np.testing.assert_array_equal(anchor_frames, frames)
+        np.testing.assert_array_equal(anchor_times, times)
+        self.assertEqual(qc.matched_transition_count, len(frames))
+        self.assertEqual(qc.matching_method, "strict_one_to_one")
+        self.assertEqual(qc.residual_reference, "endpoint_secant_descriptive_only")
+        self.assertGreater(qc.p95_absolute_residual_ms, 40)
+        midpoint = (frames[49] + frames[50]) / 2
+        self.assertEqual(np.interp(midpoint, anchor_frames, anchor_times), (times[49] + times[50]) / 2)
+
+    def test_equal_counts_with_wrong_polarity_fail(self):
+        logger = LoggerEvents(Path("polarity.csv"), 0, np.array([]),
+                              np.array([10, 20, 30, 40]), np.array([1, 0, 1, 0]))
+        with self.assertRaisesRegex(ValueError, "polarity mismatch at index 0"):
+            align_logger_frames_to_harp(logger, [1, 2, 3, 4], [0, 1, 0, 1])
+
+    def test_extra_terminal_fall_is_not_dropped(self):
+        logger = LoggerEvents(Path("tail.csv"), 0, np.array([]),
+                              np.array([10, 20, 30]), np.array([1, 0, 1]))
+        times, states, _ = extract_harp_photodiode_transitions({
+            "analog_times": np.arange(6.0), "photodiode": np.array([0, 1, 0, 1, 0, 0]),
+            "normalized_slap2_start": np.array([1.5]), "normalized_slap2_end": np.array([2.5]),
+        })
+        np.testing.assert_array_equal(times, [1, 2, 3, 4])
+        with self.assertRaisesRegex(ValueError, "count mismatch: logger=3, HARP=4"):
+            align_logger_frames_to_harp(logger, times, states)
+
+    def test_invalid_transition_arrays_fail_without_filtering(self):
+        logger = LoggerEvents(Path("invalid.csv"), 0, np.array([]),
+                              np.array([10, 20, 30]), np.array([1, 0, 1]))
+        for times, states in (([1, 1, 3], [1, 0, 1]), ([1, np.nan, 3], [1, 0, 1]),
+                              ([1, 2, 3], [1, 0]), ([1, 2, 3], [1, 2, 1])):
+            with self.subTest(times=times, states=states):
+                with self.assertRaisesRegex(ValueError, "HARP photodiode transitions"):
+                    align_logger_frames_to_harp(logger, times, states)
 
     def test_low_baseline_only_inserts_initial_high_state(self):
         for initial_high in (False, True):
@@ -135,6 +192,60 @@ class StimulusSyncTests(unittest.TestCase):
         self.assertIs(result, expected)
         self.assertEqual(metadata["source"], "harp_do2_fallback")
         self.assertIn("no stimulus logger", metadata["logger_fallback_reason"])
+
+    def test_end_frame_implies_low_on_next_frame_only_when_final_state_high(self):
+        for final_high in (False, True):
+            for has_end_frame in (False, True):
+                with self.subTest(final_high=final_high, has_end_frame=has_end_frame):
+                    rows = [(0, 0, "STARTSLAP"), (0, 0, "StimStart-one")]
+                    rows += [(i, i / 60, f"Photodiode-{state}")
+                             for i, state in enumerate([0, 1, 0, 1] + ([] if final_high else [0]))]
+                    rows.append((8, 8 / 60, "END"))
+                    if has_end_frame:
+                        rows.append((8, 8 / 60, "EndFrame"))
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / "logger.csv"
+                        pd.DataFrame(rows, columns=["Frame", "Timestamp", "Value"]).to_csv(path, index=False)
+                        original = path.read_bytes()
+                        result = extract_logger_events(path, initial_low_baseline=True,
+                                                       terminal_low_after_end_frame=True)
+                        legacy = extract_logger_events(path, initial_low_baseline=True)
+                        self.assertEqual(path.read_bytes(), original)
+                    if has_end_frame and final_high:
+                        np.testing.assert_array_equal(result.transition_frames, [1, 2, 3, 9])
+                        np.testing.assert_array_equal(result.transition_states, [True, False, True, False])
+                        self.assertEqual(result.terminal_low_frame, 9)
+                    else:
+                        np.testing.assert_array_equal(result.transition_frames, legacy.transition_frames)
+                        self.assertIsNone(result.terminal_low_frame)
+                    self.assertIsNone(legacy.terminal_low_frame)
+
+    def test_terminal_rule_ignores_end_events(self):
+        base = [(0, 0, "STARTSLAP"), (0, 0, "StimStart-one"),
+                (1, 0, "Photodiode-1"), (2, 0, "Photodiode-0"),
+                (3, 0, "Photodiode-1"), (4, 0, "EndFrame")]
+        for markers in ([], [(4, 0, "END")], [(5, 0, "END")],
+                        [(5, 0, "END"), (6, 0, "END")], [("invalid", 0, "END")]):
+            with self.subTest(markers=markers), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "logger.csv"
+                pd.DataFrame(base + markers, columns=["Frame", "Timestamp", "Value"]).to_csv(path, index=False)
+                result = extract_logger_events(path, initial_low_baseline=True,
+                                               terminal_low_after_end_frame=True)
+                np.testing.assert_array_equal(result.transition_frames, [1, 2, 3, 5])
+                np.testing.assert_array_equal(result.transition_states, [True, False, True, False])
+                self.assertEqual(result.terminal_low_frame, 5)
+
+    def test_terminal_rule_rejects_invalid_end_frame_and_late_events(self):
+        base = [(0, 0, "STARTSLAP"), (0, 0, "StimStart-one"),
+                (1, 0, "Photodiode-1"), (2, 0, "Photodiode-0"), (3, 0, "Photodiode-1")]
+        for markers, message in (([(4, 0, "EndFrame"), (5, 0, "EndFrame")], "at most one"),
+                                 ([(2, 0, "EndFrame")], "beyond EndFrame"),
+                                 ([(4.5, 0, "EndFrame")], "nonnegative integer")):
+            with self.subTest(markers=markers), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "logger.csv"
+                pd.DataFrame(base + markers, columns=["Frame", "Timestamp", "Value"]).to_csv(path, index=False)
+                with self.assertRaisesRegex(ValueError, message):
+                    extract_logger_events(path, initial_low_baseline=True, terminal_low_after_end_frame=True)
 
     @patch("stimulus_sync.synchronize_stimulus_frames")
     def test_logger_photodiode_is_preferred(self, synchronize):

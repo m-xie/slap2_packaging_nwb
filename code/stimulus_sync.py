@@ -14,11 +14,17 @@ class LoggerEvents:
     stimulus_frames: np.ndarray
     transition_frames: np.ndarray
     transition_states: np.ndarray
+    terminal_low_frame: int | None = None
 
 
 @dataclass(frozen=True)
 class AlignmentQC:
-    """Summary statistics for a logger-frame to HARP-time alignment."""
+    """Strict pairing metadata with descriptive, non-gating timing statistics.
+
+    frame_rate_hz is the endpoint-to-endpoint average rate. Residual fields
+    describe departures from that endpoint line, NOT a fitted alignment or
+    timing uncertainty. They never select, reject, or move an anchor.
+    """
 
     logger_path: str
     logger_transition_count: int
@@ -28,6 +34,8 @@ class AlignmentQC:
     median_absolute_residual_ms: float
     p95_absolute_residual_ms: float
     maximum_absolute_residual_ms: float
+    matching_method: str = "strict_one_to_one"
+    residual_reference: str = "endpoint_secant_descriptive_only"
 
 
 def select_stimulus_logger(candidate_paths):
@@ -39,7 +47,8 @@ def select_stimulus_logger(candidate_paths):
     return duplicate_paths[0] if duplicate_paths else paths[0]
 
 
-def extract_logger_events(logger_path, *, stimulus_frames=None, initial_low_baseline=False):
+def extract_logger_events(logger_path, *, stimulus_frames=None, initial_low_baseline=False,
+                          terminal_low_after_end_frame=False):
     """Extract expected photodiode changes and stimulus display frames.
 
     Format adapters may supply validated stimulus frames; by default the
@@ -48,6 +57,10 @@ def extract_logger_events(logger_path, *, stimulus_frames=None, initial_low_base
     rising edge at its logged frame, regardless of the STARTSLAP frame. A low
     first state is not an edge. This assumes the pre-logging patch was low;
     later state changes (including observed high-to-low changes) are unchanged.
+    With terminal_low_after_end_frame=True, EndFrame declares that its next
+    frame is low. If the last explicit state is high, append that implied
+    falling transition at EndFrame + 1. Without EndFrame, infer nothing.
+    END events are not used by this rule.
     """
     logger_path = Path(logger_path)
     table = pd.read_csv(logger_path)
@@ -95,14 +108,29 @@ def extract_logger_events(logger_path, *, stimulus_frames=None, initial_low_base
         # Preserve the historical first-state anchor by default. For a known
         # low baseline, count the first high even when STARTSLAP is elsewhere.
         transition_indices = np.insert(transition_indices, 0, 0)
-    if len(transition_indices) < 3:
-        raise ValueError(
-            f"Logger {logger_path} has too few photodiode transitions: "
-            f"{len(transition_indices)}"
-        )
-
     transition_frames = photodiode_frames[transition_indices]
     transition_states = states[transition_indices]
+    terminal_low_frame = None
+    if terminal_low_after_end_frame:
+        end_rows = table.loc[values.eq("EndFrame"), "Frame"]
+        if len(end_rows) > 1:
+            raise ValueError("Terminal photodiode rule requires at most one EndFrame")
+        if len(end_rows):
+            end_frame = float(end_rows.iloc[0])
+            if not np.isfinite(end_frame) or end_frame < 0 or end_frame != np.floor(end_frame):
+                raise ValueError("EndFrame must be a nonnegative integer")
+            if len(photodiode_frames) and photodiode_frames[-1] > end_frame:
+                raise ValueError("Photodiode events extend beyond EndFrame")
+            if len(states) and states[-1]:
+                terminal_low_frame = int(end_frame) + 1
+                transition_frames = np.append(transition_frames, terminal_low_frame)
+                transition_states = np.append(transition_states, False)
+    if len(transition_frames) < 3:
+        raise ValueError(
+            f"Logger {logger_path} has too few photodiode transitions: "
+            f"{len(transition_frames)}"
+        )
+
     if np.any(np.diff(transition_frames) <= 0):
         raise ValueError("Logger photodiode transition frames must increase")
 
@@ -112,195 +140,100 @@ def extract_logger_events(logger_path, *, stimulus_frames=None, initial_low_base
         stimulus_frames=stimulus_frames,
         transition_frames=transition_frames,
         transition_states=transition_states,
+        terminal_low_frame=terminal_low_frame,
     )
 
 
 def extract_harp_photodiode_transitions(harp_data):
-    """Binarize the physical photodiode and return its HARP-timed edges.
+    """Detect every photodiode transition across the full analog recording.
 
-    DO1 normally bounds the useful analog interval. If DO1 is absent, the HARP
-    analog recording end is used instead: DI3 can stop before a stimulus block
-    ends, so its final cycle is not a safe photodiode cutoff.
+    DO0/DO1 are not optical bounds. Neither samples nor edges are cropped to
+    them, to DI3, or to a desired logger count. Estimate the threshold from the
+    full recording; retain leading/trailing and noisy edges so mismatches are
+    visible to the strict pairing check rather than silently repaired.
     """
     analog_times = np.asarray(harp_data["analog_times"], dtype=float)
     photodiode = np.asarray(harp_data["photodiode"], dtype=float)
-    starts = np.asarray(harp_data["normalized_slap2_start"], dtype=float)
-    ends = np.asarray(harp_data["normalized_slap2_end"], dtype=float)
-    if len(starts) == 0:
-        raise ValueError("HARP DO0 pulse is required for photodiode sync")
-
-    acquisition_start = float(starts[0])
-    if len(ends):
-        acquisition_end = float(ends[-1])
-    else:
-        # Logger matching and residual gates below reject an unusable analog
-        # tail; keeping it is preferable to dropping valid post-imaging stimuli.
-        acquisition_end = float(analog_times[-1])
-    if acquisition_end <= acquisition_start:
-        raise ValueError("HARP acquisition end must follow acquisition start")
-    # Long pre-acquisition recordings contain baseline ADC noise but no useful
-    # bright state. Restricting level estimation to the acquisition interval
-    # prevents that noise from collapsing the threshold toward the baseline.
-    in_acquisition = (
-        (analog_times >= acquisition_start) & (analog_times <= acquisition_end)
-    )
-    if np.count_nonzero(in_acquisition) < 3:
-        raise ValueError("HARP photodiode has too few in-acquisition samples")
-
-    times = analog_times[in_acquisition]
-    signal = photodiode[in_acquisition]
+    if (
+        analog_times.ndim != 1 or photodiode.shape != analog_times.shape
+        or len(analog_times) < 3
+        or not np.isfinite(analog_times).all() or not np.isfinite(photodiode).all()
+        or np.any(np.diff(analog_times) <= 0)
+    ):
+        raise ValueError("HARP analog samples must be finite paired arrays with strictly increasing times (at least 3 samples)")
     # Percentiles are robust to brief transitions and isolated analog outliers.
-    low, high = np.quantile(signal, (0.1, 0.9))
+    low, high = np.quantile(photodiode, (0.1, 0.9))
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         raise ValueError("HARP photodiode levels cannot be separated")
     threshold = (low + high) / 2
-    states = signal > threshold
+    states = photodiode > threshold
     transition_indices = np.flatnonzero(states[1:] != states[:-1]) + 1
     if len(transition_indices) < 3:
         raise ValueError(
             f"HARP photodiode has too few transitions: {len(transition_indices)}"
         )
-    return times[transition_indices], states[transition_indices], threshold
-
-
-def _ordered_transition_matches(
-    logger_frames,
-    logger_states,
-    harp_times,
-    harp_states,
-    slope,
-    intercept,
-    tolerance,
-):
-    """Greedily pair same-state edges without reusing or reordering HARP edges."""
-    matches = []
-    last_harp_index = -1
-    for logger_index, (frame, state) in enumerate(
-        zip(logger_frames, logger_states)
-    ):
-        predicted_time = slope * frame + intercept
-        candidates = np.flatnonzero(
-            (harp_states == state)
-            & (np.abs(harp_times - predicted_time) <= tolerance)
-        )
-        # Advancing this lower bound makes every accepted match one-to-one and
-        # order-preserving while allowing either trace to omit occasional edges.
-        candidates = candidates[candidates > last_harp_index]
-        if len(candidates) == 0:
-            continue
-        harp_index = int(
-            candidates[np.argmin(np.abs(harp_times[candidates] - predicted_time))]
-        )
-        matches.append((logger_index, harp_index))
-        last_harp_index = harp_index
-    return np.asarray(matches, dtype=int).reshape(-1, 2)
+    return analog_times[transition_indices], states[transition_indices], threshold
 
 
 def align_logger_frames_to_harp(
     logger_data,
     harp_times,
     harp_states,
-    nominal_frame_rate_hz=60.0,
-    initial_tolerance=0.12,
 ):
-    """Align expected logger edges to physical HARP edges in frame coordinates.
+    """Pair all logger and measured photodiode edges one-to-one, in order.
 
-    The fitted line initializes and validates correspondence; returned anchors
-    retain the measured HARP edge times for subsequent piecewise interpolation.
+    Counts and polarities must agree exactly. No fit, tolerance, event search,
+    outlier rejection, or cropping selects the anchors. Their original frames
+    and measured HARP times define the downstream piecewise-linear mapping.
     """
-    relative_frames = (
-        logger_data.transition_frames.astype(float) - logger_data.reference_frame
-    )
-    slope = 1.0 / nominal_frame_rate_hz
-
-    # STARTSLAP/DO0 provide an approximate common origin, but retained HARP time
-    # may remain offset after removal of a leading acquisition artifact. Center
-    # the search on the first edges, then let the full random pattern determine
-    # the best sub-frame-scale offset.
-    offset_center = harp_times[0] - slope * relative_frames[0]
-    candidate_offsets = np.linspace(
-        offset_center - 0.15, offset_center + 0.15, 301
-    )
-    best_score = None
-    intercept = 0.0
-    for offset in candidate_offsets:
-        predicted = slope * relative_frames + offset
-        errors = []
-        for state in (False, True):
-            source = predicted[logger_data.transition_states == state]
-            target = harp_times[harp_states == state]
-            if len(source) == 0 or len(target) == 0:
-                continue
-            positions = np.searchsorted(target, source)
-            left = target[np.clip(positions - 1, 0, len(target) - 1)]
-            right = target[np.clip(positions, 0, len(target) - 1)]
-            errors.extend(np.minimum(np.abs(source - left), np.abs(source - right)))
-        errors = np.asarray(errors)
-        score = (
-            np.count_nonzero(errors <= 0.025),
-            -float(np.median(np.minimum(errors, 0.25))),
-        )
-        if best_score is None or score > best_score:
-            best_score = score
-            intercept = float(offset)
-
-    # Alternate ordered matching and affine fitting. The first pass is loose
-    # enough for the coarse offset; later passes tighten around the fitted map.
-    matches = np.empty((0, 2), dtype=int)
-    for iteration in range(8):
-        tolerance = initial_tolerance if iteration == 0 else 0.05
-        new_matches = _ordered_transition_matches(
-            relative_frames,
-            logger_data.transition_states,
-            harp_times,
-            harp_states,
-            slope,
-            intercept,
-            tolerance,
-        )
-        if len(new_matches) < 10:
-            raise ValueError(
-                f"Too few logger/HARP photodiode matches: {len(new_matches)}"
-            )
-        x = relative_frames[new_matches[:, 0]]
-        y = harp_times[new_matches[:, 1]]
-        new_slope, new_intercept = np.polyfit(x, y, 1)
-        residuals = y - (new_slope * x + new_intercept)
-        # Median/MAD rejection removes occasional incorrect or noisy edges
-        # without imposing a sub-millisecond requirement on display hardware.
-        center = np.median(residuals)
-        mad = np.median(np.abs(residuals - center))
-        keep = np.abs(residuals - center) <= max(0.035, 6 * 1.4826 * mad)
-        new_matches = new_matches[keep]
-        slope, intercept = float(new_slope), float(new_intercept)
-        if np.array_equal(new_matches, matches):
-            matches = new_matches
-            break
-        matches = new_matches
-
-    logger_indices = matches[:, 0]
-    harp_indices = matches[:, 1]
-    anchor_frames = logger_data.transition_frames[logger_indices].astype(float)
-    anchor_times = harp_times[harp_indices]
-    residuals = anchor_times - (
-        slope * (anchor_frames - logger_data.reference_frame) + intercept
-    )
-    absolute_residuals = np.abs(residuals)
-    # These are session-level quality gates. Observed good sessions retain over
-    # 95% of edges with p95 residuals around 15-20 ms.
-    if len(matches) < 0.5 * min(
-        len(logger_data.transition_frames), len(harp_times)
+    anchor_frames = np.asarray(logger_data.transition_frames, dtype=float)
+    anchor_times = np.asarray(harp_times, dtype=float)
+    logger_states = np.asarray(logger_data.transition_states)
+    harp_states = np.asarray(harp_states)
+    for label, coordinates, states in (
+        ("Logger", anchor_frames, logger_states),
+        ("HARP", anchor_times, harp_states),
     ):
-        raise ValueError("Photodiode alignment matched fewer than half the transitions")
-    if np.quantile(absolute_residuals, 0.95) > 0.04:
-        raise ValueError("Photodiode alignment p95 residual exceeds 40 ms")
+        if (
+            coordinates.ndim != 1 or states.shape != coordinates.shape
+            or not np.isfinite(coordinates).all()
+            or np.any(np.diff(coordinates) <= 0)
+            or not np.isin(states, (False, True)).all()
+        ):
+            raise ValueError(f"{label} photodiode transitions must have finite strictly increasing coordinates and paired binary states")
+    if len(anchor_frames) != len(anchor_times):
+        raise ValueError(
+            "Photodiode transition count mismatch: "
+            f"logger={len(anchor_frames)}, HARP={len(anchor_times)}. "
+            "Strict one-to-one pairing requires equal counts; all detected "
+            "transitions are retained without DO0/DO1 cropping or edge skipping."
+        )
+    if len(anchor_frames) < 2:
+        raise ValueError("At least two paired photodiode transitions are required")
+    mismatch = np.flatnonzero(logger_states != harp_states)
+    if mismatch.size:
+        index = int(mismatch[0])
+        raise ValueError(
+            f"Photodiode transition polarity mismatch at index {index} (zero-based): "
+            f"logger frame {anchor_frames[index]:g}, state {int(logger_states[index])}; "
+            f"HARP time {anchor_times[index]:.9f} s, state {int(harp_states[index])}. "
+            "Strict one-to-one pairing does not shift or skip edges."
+        )
+    if np.any(logger_states[1:] == logger_states[:-1]):
+        raise ValueError("Photodiode transition states must alternate; repeated states are not transitions")
+
+    # Descriptive metadata only: departures from the line joining the first
+    # and last anchors. No line is fitted and these values cannot reject data.
+    seconds_per_frame = (anchor_times[-1] - anchor_times[0]) / (anchor_frames[-1] - anchor_frames[0])
+    endpoint_line = anchor_times[0] + seconds_per_frame * (anchor_frames - anchor_frames[0])
+    absolute_residuals = np.abs(anchor_times - endpoint_line)
 
     qc = AlignmentQC(
         logger_path=str(logger_data.path),
         logger_transition_count=len(logger_data.transition_frames),
         harp_transition_count=len(harp_times),
-        matched_transition_count=len(matches),
-        frame_rate_hz=1.0 / slope,
+        matched_transition_count=len(anchor_frames),
+        frame_rate_hz=1.0 / seconds_per_frame,
         median_absolute_residual_ms=float(np.median(absolute_residuals) * 1000),
         p95_absolute_residual_ms=float(
             np.quantile(absolute_residuals, 0.95) * 1000
