@@ -79,7 +79,7 @@ row identifiers are preserved even when only a prefix can be synchronized.
 
 #### Per-movie frame timing
 
-Each movie row in `stimulus_blocks` now contains four equal-length NWB ragged
+Each movie row in `stimulus_blocks` now contains five equal-length NWB ragged
 arrays (non-movie rows contain typed empty arrays):
 
 | Column | Meaning |
@@ -88,6 +88,12 @@ arrays (non-movie rows contain typed empty arrays):
 | `movie_frame_numbers` | Original 1-based `MovieFrame-N` logger counters, reset for each presentation. |
 | `movie_display_frames` | Global logger `Frame` coordinates for those events. |
 | `movie_frame_timing_status` | UInt8 codes: **0** anchored, **1** interpolated, **2** endpoint-extrapolated, **3** unsupported. |
+| `movie_frame_playback_status` | UInt8 codes: **0** no anomaly detected, **1** shared display frame. All affected content events are flagged; which content was physically displayed is unknown. Independent of timing quality. |
+
+Consecutive movie counters sharing a display frame are preserved with equal
+aligned event timestamps and a warning, not assigned invented separate onsets.
+Their playback flags can be used to mask ambiguous content in downstream analyses.
+Backwards frames, invalid content counters, and coincident grating events still fail.
 
 `movie_url` links known movie textures to the supplied commit-pinned GitHub
 assets; it is empty for non-movie rows or unknown textures. Movie counters are

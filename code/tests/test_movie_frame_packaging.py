@@ -25,6 +25,7 @@ class MovieFramePackagingTests(unittest.TestCase):
             "gratings_only": ("gratings",),
             "movie_only_with_gap": ("movie", "movie"),
             "interrupted": ("movie", "movie", "gratings", "movie"),
+            "shared_display_frame": ("movie", "gratings"),
         }
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -32,6 +33,9 @@ class MovieFramePackagingTests(unittest.TestCase):
                 table, logger = example_session(kinds)
                 if scenario == "interrupted":
                     logger = logger.loc[~logger.Value.isin(("END", "EndFrame"))]
+                elif scenario == "shared_display_frame":
+                    logger.loc[logger.Value.eq("MovieFrame-3"), "Frame"] = 12
+                    logger = logger.sort_values("Frame", kind="stable")
                 table_path, logger_path = root / "stim.csv", root / "logger.csv"
                 table.to_csv(table_path, index=False)
                 logger.to_csv(logger_path, index=False)
@@ -93,7 +97,9 @@ class MovieFramePackagingTests(unittest.TestCase):
                                 np.testing.assert_allclose(
                                     row.movie_frame_timestamps[finite], 0.5 + row.movie_display_frames[finite] * 0.02,
                                 )
-                                self.assertTrue(np.all(np.diff(row.movie_frame_timestamps[finite]) > 0))
+                                self.assertTrue(np.all(np.diff(row.movie_frame_timestamps[finite]) >= 0))
+                                expected_playback = [0, 1, 1, 0] if scenario == "shared_display_frame" and count else np.zeros(count, dtype=np.uint8)
+                                np.testing.assert_array_equal(row.movie_frame_playback_status, expected_playback)
                                 self.assertTrue(np.all(row.movie_frame_timestamps[finite] >= row.start_time))
                                 self.assertTrue(np.all(row.movie_frame_timestamps[finite] <= row.stop_time))
                             if scenario == "movie_only_with_gap":

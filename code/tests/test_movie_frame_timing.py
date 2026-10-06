@@ -117,10 +117,14 @@ class MovieFrameMappingTests(unittest.TestCase):
                     movies.map_movie_frames([], [0, 1], [0, 1], gap)
 
     def test_invalid_movie_display_coordinates_are_rejected(self):
-        for frames in ([1, 1], [2, 1], [np.nan], [np.inf], [[1, 2]], 1):
+        for frames in ([2, 1], [np.nan], [np.inf], [[1, 2]], 1):
             with self.subTest(frames=frames):
                 with self.assertRaisesRegex(ValueError, "Movie display frames"):
                     movies.map_movie_frames(frames, [0, 10], [0, 1], 10)
+
+    def test_shared_display_frames_keep_equal_timestamps_and_timing_status(self):
+        self.assert_mapping([0, 5, 5, 10], [0, 10], [0, 1], 10,
+                            [0, 0.5, 0.5, 1], [0, 1, 1, 0])
 
     def test_inputs_are_not_modified(self):
         arrays = [np.array([0, 5, 10]), np.array([0, 10]), np.array([0.0, 1.0])]

@@ -78,6 +78,32 @@ class RandomNaturalMoviesTests(unittest.TestCase):
         self.logger.to_csv(self.path, index=False)
         return movies.read_presentation_frames(self.table, self.path)
 
+    def test_shared_movie_display_frames_flag_every_affected_counter(self):
+        for counters, expected in (((2, 3), [0, 1, 1, 0]),
+                                   ((1, 2, 3), [1, 1, 1, 0]),
+                                   ((1, 2, 3, 4), [1, 1, 1, 1])):
+            with self.subTest(counters=counters):
+                self.table, self.logger = example_session(("movie", "gratings"))
+                mask = self.logger.Value.isin([f"MovieFrame-{n}" for n in counters])
+                self.logger.loc[mask, "Frame"] = self.logger.loc[mask, "Frame"].min()
+                if counters == (1, 2, 3):
+                    self.logger.loc[self.logger.Value.eq("MovieFrame-4"), "Frame"] = 12
+                self.logger = self.logger.sort_values("Frame", kind="stable")
+                with self.assertWarnsRegex(RuntimeWarning, "sharing display frames"):
+                    blocks, _ = self.read_frames()
+                np.testing.assert_array_equal(blocks.iloc[0].movie_frame_numbers, [1, 2, 3, 4])
+                np.testing.assert_array_equal(blocks.iloc[0].movie_frame_playback_status, expected)
+                self.assertEqual(blocks.iloc[1].movie_frame_playback_status.size, 0)
+                self.assertTrue(any("sharing display frames" in w for w in blocks.attrs["recovery_warnings"]))
+
+    def test_grating_events_cannot_share_display_frames(self):
+        self.table, self.logger = example_session(("gratings",))
+        start = self.logger.loc[self.logger.Value.eq("GratingStart-315"), "Frame"].iloc[0]
+        self.logger.loc[self.logger.Value.eq("GratingEnd-315"), "Frame"] = start
+        self.logger = self.logger.sort_values("Frame", kind="stable")
+        with self.assertRaisesRegex(ValueError, "Only consecutive movie counters"):
+            self.read_frames()
+
     def test_preserves_rows_and_separates_adjacent_grating_blocks(self):
         blocks, gratings = self.read_frames()
         pd.testing.assert_frame_equal(blocks[self.table.columns], self.table)

@@ -38,6 +38,11 @@ MOVIE_FRAME_COLUMNS = {
         "Per-frame timing quality: 0=photodiode anchor, 1=interpolated, "
         "2=bounded endpoint extrapolation, 3=unsupported (timestamp NaN). "
         "Unsupported includes large anchor gaps and frames beyond a censored block."),
+    "movie_frame_playback_status": (np.uint8,
+        "Per-event playback status: 0=no anomaly detected, 1=shared display frame. "
+        "All content events sharing a display frame are flagged; which content was "
+        "physically displayed is unknown. Shared timestamps describe logged events, "
+        "not distinct measured visual onsets. Independent of timing quality."),
 }
 MOVIE_URL_BASE = (
     "https://github.com/AllenNeuralDynamics/ophys-passive-visual-stim/blob/"
@@ -215,8 +220,15 @@ def read_presentation_frames(stimulus_table, logger_path):
     if not events:
         raise ValueError("Random Natural Movies logger has no presentation events")
     event_frames = np.asarray([event[2] for event in events])
+    shared_frames = np.flatnonzero(np.diff(event_frames) == 0)
+    if any(
+        events[i][0] != "MovieFrame" or events[i + 1][0] != "MovieFrame"
+        or events[i + 1][1] != events[i][1] + 1
+        for i in shared_frames
+    ):
+        raise ValueError("Only consecutive movie counters may share a presentation frame")
     if (
-        np.any(np.diff(event_frames) <= 0)
+        np.any(np.diff(event_frames) < 0)
         or event_frames[0] < starts[0] or event_frames[-1] > observed_end
     ):
         raise ValueError("Presentation frames must increase within STARTSLAP/END")
@@ -234,6 +246,7 @@ def read_presentation_frames(stimulus_table, logger_path):
         is_partial = False
         movie_frames = []
         movie_numbers = []
+        playback_status = np.array([], dtype=np.uint8)
         if row["TrialType"] == "movie":
             if events[position][:2] != ("MovieFrame", 1):
                 raise ValueError(f"Expected MovieFrame-1 for stimulus table row {row_id}")
@@ -249,9 +262,16 @@ def read_presentation_frames(stimulus_table, logger_path):
                 movie_frames.append(frame)
                 movie_numbers.append(counter)
                 position += 1
-            single_frame = len(movie_frames) == 1
+            shared = np.diff(movie_frames) == 0
+            playback_status = (np.r_[shared, False] | np.r_[False, shared]).astype(np.uint8)
+            if playback_status.any():
+                warn(
+                    f"Movie at table row {row_id} has {int(playback_status.sum())} content events "
+                    "sharing display frames; preserving counters and flagging ambiguous playback."
+                )
+            single_frame = len(set(movie_frames)) == 1
             if single_frame:
-                warn(f"Movie at table row {row_id} has only one frame; playback cadence cannot be estimated.")
+                warn(f"Movie at table row {row_id} has only one frame coordinate; playback cadence cannot be estimated.")
                 is_partial = True
             # Flag shortened terminal repeats without using TrialDuration.
             # Interior multi-frame inconsistencies still indicate a sequence
@@ -263,7 +283,9 @@ def read_presentation_frames(stimulus_table, logger_path):
                     raise ValueError(f"Inconsistent playback frame counts for {texture}")
                 warn(f"Inconsistent playback frame counts for {texture} at table row {row_id}; retaining observed frames as partial.")
                 is_partial = True
-            cadence = None if single_frame else float(np.median(np.diff(movie_frames)))
+            positive_steps = np.diff(movie_frames)
+            positive_steps = positive_steps[positive_steps > 0]
+            cadence = float(np.median(positive_steps)) if positive_steps.size else None
             if position == len(events) and session_end is not None:
                 stop_frame = session_end
                 stop_source = "session_end"
@@ -342,6 +364,7 @@ def read_presentation_frames(stimulus_table, logger_path):
             "is_partial": is_partial,
             "movie_display_frames": np.asarray(movie_frames, dtype=np.int64),
             "movie_frame_numbers": np.asarray(movie_numbers, dtype=np.int64),
+            "movie_frame_playback_status": playback_status,
         })
     if position != len(events):
         raise ValueError("Logger contains extra presentation events after the stimulus table")
@@ -421,8 +444,8 @@ def map_movie_frames(frames, anchor_frames, anchor_times, maximum_gap_frames):
     if not np.isfinite(maximum_gap_frames) or maximum_gap_frames <= 0:
         raise ValueError("maximum_gap_frames must be finite and positive")
     frames = np.asarray(frames, dtype=float)
-    if frames.ndim != 1 or not np.isfinite(frames).all() or np.any(np.diff(frames) <= 0):
-        raise ValueError("Movie display frames must be finite and strictly increasing")
+    if frames.ndim != 1 or not np.isfinite(frames).all() or np.any(np.diff(frames) < 0):
+        raise ValueError("Movie display frames must be finite and nondecreasing")
     times = np.full(len(frames), np.nan, dtype=np.float64)
     status = np.full(len(frames), MOVIE_FRAME_STATUS["unsupported"], dtype=np.uint8)
     right = np.searchsorted(anchor_frames, frames)
