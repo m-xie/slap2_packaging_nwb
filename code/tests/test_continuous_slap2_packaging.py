@@ -648,7 +648,7 @@ class ContinuousSlap2PackagingTests(unittest.TestCase):
             if has_end:
                 stack.enter_context(self.assertWarnsRegex(RuntimeWarning, 'Removed erroneous leading'))
             packaging.main()
-        trim_leading.assert_called_once_with(self.harp)
+        trim_leading.assert_called_once_with(self.harp, continuous=True)
         trim_trailing.assert_not_called()
         add_ophys.assert_called_once()
         prepared_harp = add_ophys.call_args.args[4]

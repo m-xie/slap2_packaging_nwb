@@ -122,21 +122,26 @@ def extract_harp(harp_path, expected_n_trials=None):
     return time_dict
 
 
-def trim_leading_trial_pulse_artifact(harp_data):
-    """Remove a very short leading SLAP2 pulse pair and its DO2 events."""
+def trim_leading_trial_pulse_artifact(harp_data, *, continuous=False):
+    """Remove a leading pair shorter than 0.1 s and its DO2 events.
+
+    Legacy trials also require it to be shorter than 10% of later durations;
+    continuous Random Natural Movies needs no later complete pair.
+    """
     starts = harp_data["normalized_slap2_start"]
     ends = harp_data["normalized_slap2_end"]
     n_complete_trials = min(len(starts), len(ends))
-    if n_complete_trials < 2:
+    if n_complete_trials < 1 or (not continuous and n_complete_trials < 2):
         return dict(harp_data)
 
     durations = ends[:n_complete_trials] - starts[:n_complete_trials]
     first_duration = float(durations[0])
-    typical_duration = float(np.median(durations[1:]))
-    is_artifact = (
-        0 < first_duration < 0.1
-        and first_duration < 0.1 * typical_duration
-    )
+    is_artifact = 0 < first_duration < 0.1
+    comparison = ""
+    if not continuous:
+        typical_duration = float(np.median(durations[1:]))
+        is_artifact = is_artifact and first_duration < 0.1 * typical_duration
+        comparison = f" versus a typical later trial duration of {typical_duration:.6f} seconds"
     if not is_artifact:
         return dict(harp_data)
 
@@ -154,7 +159,7 @@ def trim_leading_trial_pulse_artifact(harp_data):
 
     # DO2 events emitted by the aborted acquisition must be removed with its
     # DO0/DO1 pair or the legacy stimulus table gains an unmatched onset.
-    first_retained_start = starts[1]
+    first_retained_start = starts[1] if len(starts) > 1 else np.inf
     grating_times = harp_data.get("grating_times")
     if grating_times is not None:
         retained_gratings = np.asarray(grating_times)[
@@ -170,8 +175,7 @@ def trim_leading_trial_pulse_artifact(harp_data):
 
     warnings.warn(
         "Removed erroneous leading SLAP2 pulse pair: "
-        f"duration was {first_duration:.6f} seconds versus a typical later "
-        f"trial duration of {typical_duration:.6f} seconds.",
+        f"duration was {first_duration:.6f} seconds{comparison}.",
         RuntimeWarning,
         stacklevel=2,
     )

@@ -260,8 +260,10 @@ def main():
         nwbfile = nwb_io.read()
         with h5py.File(experiment_summary_path, "r") as experiment_summary:
             harp_data = harp_utils.extract_harp(harp_path)
-            # Both formats use the same startup-pair and associated DO2 cleanup.
-            harp_data = harp_utils.trim_leading_trial_pulse_artifact(harp_data)
+            # Continuous startup cleanup does not require a later stop pulse.
+            harp_data = harp_utils.trim_leading_trial_pulse_artifact(
+                harp_data, continuous=logger_format == random_natural_movies.LOGGER_FORMAT,
+            )
             if logger_format == random_natural_movies.LOGGER_FORMAT:
                 harp_utils.qc_continuous_harp(harp_data)
                 exclude_final_trial = False

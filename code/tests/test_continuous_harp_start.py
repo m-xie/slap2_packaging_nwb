@@ -11,6 +11,63 @@ from slap2_continuous_sync import build_continuous_clock, map_continuous_lines
 
 
 class ContinuousHarpStartTests(unittest.TestCase):
+    def test_short_startup_pair_before_unclosed_acquisition(self):
+        data = self.fixture()
+        for key in ('slap2_end_times', 'normalized_slap2_end', 'slap2_end_signal'):
+            data[key] = data[key][:1]
+        # Legacy cleanup still requires another complete pair.
+        legacy = harp_utils.trim_leading_trial_pulse_artifact(data)
+        np.testing.assert_array_equal(legacy['normalized_slap2_start'], [0, 4])
+        with self.assertWarnsRegex(RuntimeWarning, 'Removed erroneous leading'):
+            trimmed = harp_utils.trim_leading_trial_pulse_artifact(data, continuous=True)
+        qc_continuous_harp(trimmed)
+        for key in ('slap2_start_times', 'normalized_slap2_start'):
+            np.testing.assert_array_equal(trimmed[key], [4])
+        for key in ('slap2_end_times', 'normalized_slap2_end', 'slap2_end_signal'):
+            self.assertEqual(trimmed[key].size, 0)
+        np.testing.assert_array_equal(trimmed['slap2_start_signal'], [100])
+        np.testing.assert_array_equal(trimmed['grating_times'], [5])
+        np.testing.assert_array_equal(trimmed['normalized_start_gratings'], [5])
+        np.testing.assert_array_equal(trimmed['grating_signal'], [100])
+        for key in ('time_reference', 'recording_start_time', 'analog_times',
+                    'normalized_analog_times', 'slap2_cycle_clock_times',
+                    'normalized_slap2_cycle_clock_times', 'slap2_cycle_clock_signal',
+                    'photodiode', 'wheel'):
+            self.assertIs(trimmed[key], data[key])
+        np.testing.assert_array_equal(data['normalized_slap2_start'], [0, 4])
+        np.testing.assert_array_equal(data['normalized_slap2_end'], [0.002])
+
+    def test_continuous_short_pair_needs_no_later_pair_or_duration_comparison(self):
+        for starts, ends in (([0], [0.002]), ([0, 4], [0.002, 4.003])):
+            with self.subTest(starts=starts, ends=ends):
+                data = self.fixture()
+                for key in ('slap2_start_times', 'normalized_slap2_start'):
+                    data[key] = np.array(starts, dtype=float)
+                for key in ('slap2_end_times', 'normalized_slap2_end'):
+                    data[key] = np.array(ends, dtype=float)
+                data['slap2_start_signal'] = np.ones(len(starts))
+                data['slap2_end_signal'] = np.ones(len(ends))
+                with self.assertWarns(RuntimeWarning):
+                    trimmed = harp_utils.trim_leading_trial_pulse_artifact(data, continuous=True)
+                np.testing.assert_array_equal(trimmed['normalized_slap2_start'], starts[1:])
+                np.testing.assert_array_equal(trimmed['normalized_slap2_end'], ends[1:])
+                if len(starts) == 1:
+                    self.assertEqual(trimmed['grating_times'].size, 0)
+                    with self.assertRaisesRegex(ValueError, 'exactly one retained'):
+                        qc_continuous_harp(trimmed)
+
+    def test_continuous_cleanup_preserves_missing_or_nonshort_pairs(self):
+        for ends in ([], [0], [-0.002], [0.1], [1], [np.nan], [np.inf]):
+            with self.subTest(ends=ends):
+                data = self.fixture()
+                data['slap2_end_times'] = data['normalized_slap2_end'] = np.array(ends)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    trimmed = harp_utils.trim_leading_trial_pulse_artifact(data, continuous=True)
+                self.assertEqual(len(caught), 0)
+                for key in data:
+                    self.assertIs(trimmed[key], data[key])
+
     def test_marker_validation_does_not_repeat_shared_trimming(self):
         data = self.fixture()
         with warnings.catch_warnings():
