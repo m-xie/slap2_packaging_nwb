@@ -475,14 +475,13 @@ def synchronize_presentations(stimulus_table, logger_path, harp_data, maximum_in
         terminal_low_after_end_frame=True,
     )
     harp_times, harp_states, _ = stimulus_sync.extract_harp_photodiode_transitions(harp_data)
-    # Keep raw-edge diagnostics available even when strict pairing rejects a
-    # count/polarity mismatch. This plot never selects synchronization anchors.
-    if photodiode_qc_path is not None:
-        plot_photodiode_sync(logger_data, harp_times, photodiode_qc_path)
     anchor_frames, anchor_times, qc = stimulus_sync.align_logger_frames_to_harp(
         logger_data, harp_times, harp_states,
     )
     anchor_frames, anchor_times = _validate_frame_anchors(anchor_frames, anchor_times)
+    # Diagnose exactly the pairs used by the downstream frame-to-HARP mapping.
+    if photodiode_qc_path is not None:
+        plot_photodiode_sync(anchor_frames, anchor_times, photodiode_qc_path)
     logged_frame_count = int(blocks["movie_frame_count"].sum())
     if maximum_interpolation_gap_frames is None:
         maximum_interpolation_gap_frames = MAX_INTERPOLATION_GAP_FACTOR * float(

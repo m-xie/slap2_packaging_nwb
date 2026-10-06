@@ -7,21 +7,24 @@ from matplotlib.lines import Line2D
 import numpy as np
 
 
-def plot_photodiode_sync(logger_data, harp_times, output_path):
-    """Compare endpoint edge sequences using translation only, not fitted timing.
+def plot_photodiode_sync(anchor_frames, anchor_times, output_path):
+    """Compare the actual synchronization anchor pairs at both endpoints.
 
-    Take N analog edges within 2 s of the first/last detected analog edge and
-    the first/last N logger edges. Convert display frames at fixed nominal 60 Hz.
-    Align the first pair in the first panel and the last pair in the last panel.
-    No matched anchors, fitted frame rate, logger timestamps, or stretching are
-    used. Expand the display limits if needed to show all selected logger edges;
-    this does not change the frame-to-second conversion. Analog counts include
-    all detected edges across the recording, without any DO0/DO1 cutoff.
+    Select pairs within 2 s of the first/last matched HARP anchor. Convert
+    their display frames at fixed nominal 60 Hz and align only the endpoint
+    pair. Do not apply the piecewise mapping to the plotted frame positions:
+    that would force every anchor to overlap and conceal timing differences.
+    Expand the limits when necessary without stretching either sequence.
     """
-    frame_edges = np.asarray(logger_data.transition_frames, dtype=float)
-    time_edges = np.asarray(harp_times, dtype=float)
-    if not len(frame_edges) or not len(time_edges):
-        raise ValueError("Photodiode QC requires both logger and analog edges")
+    frame_edges = np.asarray(anchor_frames, dtype=float)
+    time_edges = np.asarray(anchor_times, dtype=float)
+    if (
+        frame_edges.ndim != 1 or time_edges.shape != frame_edges.shape
+        or not frame_edges.size
+        or not np.isfinite(frame_edges).all() or not np.isfinite(time_edges).all()
+        or np.any(np.diff(frame_edges) <= 0) or np.any(np.diff(time_edges) <= 0)
+    ):
+        raise ValueError("Photodiode QC requires paired finite strictly increasing anchors")
     frame_rate = 60.0
     windows = ((time_edges[0], time_edges[0] + 2.0),
                (time_edges[-1] - 2.0, time_edges[-1]))
@@ -31,9 +34,10 @@ def plot_photodiode_sync(logger_data, harp_times, output_path):
     try:
         for ax, bounds, label in zip(axes, windows, ("First", "Last")):
             time_left, time_right = bounds
-            times = time_edges[(time_edges >= time_left) & (time_edges <= time_right)]
+            selected = (time_edges >= time_left) & (time_edges <= time_right)
+            times = time_edges[selected]
             count = len(times)
-            frames = frame_edges[:count] if label == "First" else frame_edges[-count:]
+            frames = frame_edges[selected]
             endpoint = 0 if label == "First" else -1
             shift = times[endpoint] - frames[endpoint] / frame_rate
             shifted_times = frames / frame_rate + shift
@@ -45,28 +49,25 @@ def plot_photodiode_sync(logger_data, harp_times, output_path):
             ax.set_xlim(left, right)
             ax.set_ylim(0, 1)
             ax.set_xlabel("BonVision display frame (fixed 60 Hz; horizontal shift only)")
-            ax.set_ylabel("Photodiode edge")
+            ax.set_ylabel("Photodiode anchor")
             ax.set_yticks([])
-            ax.set_title(f"{label} 2 s of analog edges vs {label.lower()} {count} BonVision edges")
+            ax.set_title(f"{label} anchors: {count} matched pairs within 2 s of endpoint")
             time_ax = ax.twiny()
             time_ax.vlines(times, 0, 1, color="g", alpha=0.6, linewidth=2, linestyle="--")
             time_ax.set_xlim(time_left, time_right)
             time_ax.set_xlabel("Harp time (s, normalized to first recorded DO0)")
             time_ax.ticklabel_format(axis="x", style="plain", useOffset=False)
-            note = (f"Selected: {count} analog / {len(frames)} BonVision edges\n"
-                    f"{label} edge pair aligned; shift = {shift:+.6f} s")
-            if len(frames) < count:
-                note += f"\nOnly {len(frames)} BonVision edges available (requested {count})"
+            note = (f"Selected: {count} matched anchor pairs\n"
+                    f"{label} anchor pair aligned; shift = {shift:+.6f} s")
             ax.text(0.01, 0.03, note, transform=ax.transAxes, fontsize=9,
                     va="bottom", bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none"})
             ax.legend(handles=[
-                Line2D([], [], color="b", alpha=0.6, label="BonVision frame edges"),
-                Line2D([], [], color="g", alpha=0.6, linestyle="--", label="Analog photodiode edges"),
+                Line2D([], [], color="b", alpha=0.6, label="BonVision frame anchors"),
+                Line2D([], [], color="g", alpha=0.6, linestyle="--", label="Harp photodiode anchors"),
             ], loc="upper right")
         fig.suptitle(
             "Visual stimulus / Harp synchronization\n"
-            f"Detected analog photodiode edges: {len(time_edges):,}  |  "
-            f"Detected BonVision frame edges: {len(frame_edges):,}\n",
+            f"Matched anchor pairs used for alignment: {len(time_edges):,}\n",
             fontsize=11,
         )
         fig.savefig(output_path, dpi=150)

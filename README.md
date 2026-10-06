@@ -91,7 +91,7 @@ no terminal state is inferred without `EndFrame` (an `END` marker alone is
 insufficient). Source logger rows and stimulus stop frames are not changed.
 Provenance records the rule, whether a transition was inferred, and its frame.
 Equal counts and polarities are required, but cannot alone
-prove that two missing/extra edges have not canceled; raw-edge QC remains
+prove that two missing/extra edges have not canceled; anchor timing QC remains
 important.
 
 The photodiode threshold is the midpoint of the 10th/90th percentiles of the
@@ -160,24 +160,24 @@ the original HARP clock offset is recorded when available.
 
 For Random Natural Movies, the synchronization QC folder contains only two PNGs:
 
-- **Photodiode synchronization:** take N analog edges within 2 s of the first
-	or last detected analog edge and overlay the first or last N BonVision edges,
-	respectively. Blue logger-frame edges use a fixed nominal **60 Hz** conversion;
-	green dashed Harp edges retain their measured times. Only a horizontal shift
-	is applied: align the first edge pair in the first panel and the last pair in
-	the last panel. No fitted rate, matched anchors, or stretching is used. Display
-	limits expand if necessary to keep all selected edges visible without changing
-	the conversion. Short recordings have overlapping windows; insufficient logger
-	edges are explicitly noted. Total analog and BonVision edge counts remain in
-	the title. Analog inputs include every detected edge in the full recording,
-	including edges before DO0 and after DO1. This fixed-rate overlay is for
-	visualization only; saved timestamps interpolate the strict one-to-one
-	measured edge pairs. The plot is also saved before reporting pairing errors.
+- **Photodiode synchronization:** show the **actual matched anchor pairs used
+	for frame-to-HARP alignment**, selecting both coordinates by the same indices
+	within 2 s of the first or last matched HARP time. Blue frame anchors use a
+	fixed nominal **60 Hz** conversion; green dashed HARP anchors retain their
+	measured times. Only a horizontal shift is applied: align the first pair in
+	the first panel and the last pair in the last panel. No fitted rate or
+	piecewise warping is applied to this visualization, so timing differences
+	are not hidden by forcing anchors to overlap. Display limits expand if
+	necessary to show all selected pairs. Short recordings have overlapping
+	windows. The title reports the total number of matched anchor pairs, not raw
+	edge counts. Excluded logger transitions are not plotted. The plot is made
+	only after successful pairing; a pairing error produces no new anchor plot.
+	Saved timestamps interpolate these same measured anchor pairs.
 	For Random Natural Movies, the first logged high photodiode state always
 	counts as a rising edge at its own frame, even if it is not the `STARTSLAP`
 	frame. An initial low state and repeated states do not add edges. If the
 	final state is high, `EndFrame` implies the falling edge at `EndFrame + 1`;
-	that implied transition is included in the logger count and overlay.
+	that implied transition appears in the overlay only if retained as an anchor.
 - **SLAP2 / DI3 synchronization:** total raw SLAP2 cycles per DMD, the total
 	detected DI3 pulse count, and a histogram of consecutive DI3 intervals in ms.
 	DI3 is compared with DMD1 (not the sum of both DMDs). All detected pulses,

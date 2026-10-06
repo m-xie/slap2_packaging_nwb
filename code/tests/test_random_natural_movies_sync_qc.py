@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from qc import random_natural_movies_sync_qc as sync_qc
-from stimulus_sync import LoggerEvents
+from stimulus_sync import LoggerEvents, align_logger_frames_to_harp
 
 
 class RandomNaturalMoviesSyncQCTests(unittest.TestCase):
@@ -29,11 +29,9 @@ class RandomNaturalMoviesSyncQCTests(unittest.TestCase):
         if times is None:
             times = [10, 10.2, 12, 15, 18, 19.7, 20]
         frames = np.asarray(frames)
-        data = LoggerEvents(self.root / "unused.csv", 600, np.array([]), frames,
-                            np.arange(len(frames)) % 2 == 0)
         output = self.root / "syncing" / "photodiode_sync.png"
         with patch.object(sync_qc.plt, "close"):
-            sync_qc.plot_photodiode_sync(data, times, output)
+            sync_qc.plot_photodiode_sync(frames, times, output)
             fig = plt.gcf()
         self.assertEqual(output.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
         return fig
@@ -51,15 +49,14 @@ class RandomNaturalMoviesSyncQCTests(unittest.TestCase):
         np.testing.assert_array_equal(edge_positions(last), [1100, 1160, 1190])
         np.testing.assert_allclose(edge_positions(first_time), [10, 10.2, 12])
         np.testing.assert_allclose(edge_positions(last_time), [18, 19.7, 20])
-        self.assertIn("First 2 s", first.get_title())
-        self.assertIn("Last 2 s", last.get_title())
+        self.assertIn("First anchors", first.get_title())
+        self.assertIn("Last anchors", last.get_title())
 
     def test_totals_count_all_edges_not_only_visible_edges(self):
         fig = self.photodiode_figure()
         text = "\n".join(item.get_text() for item in fig.texts)
-        self.assertIn("Detected analog photodiode edges: 7", text)
-        self.assertIn("Detected BonVision frame edges: 7", text)
-        self.assertNotIn("Matched pairs", text)
+        self.assertIn("Matched anchor pairs used for alignment: 7", text)
+        self.assertNotIn("Detected", text)
         # Each window only displays three edges; the title still reports all
         # seven. Axis scaling is tested numerically, not via optional prose.
         for ax in fig.axes:
@@ -83,10 +80,32 @@ class RandomNaturalMoviesSyncQCTests(unittest.TestCase):
         np.testing.assert_allclose(fig.axes[2].get_xlim(), [10, 12])
         np.testing.assert_allclose(fig.axes[3].get_xlim(), [8.2, 10.2])
 
-    def test_insufficient_logger_edges_are_explicit(self):
-        fig = self.photodiode_figure(frames=[600], times=[10, 10.2])
-        for ax in fig.axes[:2]:
-            self.assertIn("Only 1 BonVision edges available (requested 2)", ax.texts[0].get_text())
+    def test_invalid_anchor_pairs_are_rejected(self):
+        for frames, times in (
+            ([600], [10, 10.2]), ([], []),
+            ([600, 600], [10, 11]), ([600, 601], [11, 10]),
+            ([600, np.nan], [10, 11]), ([600, 601], [10, np.inf]),
+            ([[600, 601]], [[10, 11]]),
+        ):
+            with self.subTest(frames=frames, times=times):
+                with self.assertRaisesRegex(ValueError, "paired finite strictly increasing anchors"):
+                    self.photodiode_figure(frames=frames, times=times)
+
+    def test_last_panel_excludes_unmatched_terminal_blip(self):
+        logger = LoggerEvents(self.root / "unused.csv", 0, np.array([]),
+                              np.array([10, 20, 30, 40, 55, 56]),
+                              np.array([True, False, True, False, True, False]),
+                              terminal_low_frame=56)
+        with patch("builtins.print"):
+            frames, times, _ = align_logger_frames_to_harp(
+                logger, np.array([1., 2., 3., 4.]), np.array([True, False, True, False]))
+        fig = self.photodiode_figure(frames, times)
+        last, last_time = fig.axes[1], fig.axes[3]
+        np.testing.assert_array_equal(
+            [segment[0, 0] for segment in last.collections[0].get_segments()], [20, 30, 40])
+        np.testing.assert_array_equal(
+            [segment[0, 0] for segment in last_time.collections[0].get_segments()], [2, 3, 4])
+        self.assertIn("Matched anchor pairs used for alignment: 4", fig._suptitle.get_text())
 
     def test_di3_counts_raw_cycles_and_only_detected_pulse_intervals(self):
         for pulses, controls in (

@@ -248,7 +248,7 @@ class MovieFrameSynchronizationTests(unittest.TestCase):
         self.assertEqual(blocks.iloc[-1].stop_frame, 18)
         self.assertEqual(metadata["extrapolated_boundary_count"], 0)
 
-    def test_extra_tail_edge_fails_and_still_writes_raw_edge_qc(self):
+    def test_extra_tail_edge_fails_without_writing_anchor_qc(self):
         self.write_logger()
         harp, _, _ = synthetic_harp(self.logger)
         # Append a physical state change beyond the original DO1 bound.
@@ -257,7 +257,21 @@ class MovieFrameSynchronizationTests(unittest.TestCase):
         output = self.path.parent / "mismatch.png"
         with self.assertRaisesRegex(ValueError, "count mismatch"):
             movies.synchronize_presentations(self.table, self.path, harp, photodiode_qc_path=output)
-        self.assertTrue(output.is_file())
+        self.assertFalse(output.exists())
+
+    def test_photodiode_qc_receives_exact_mapping_anchors(self):
+        self.write_logger()
+        harp, _, _ = synthetic_harp(self.logger)
+        output = self.path.parent / "anchors.png"
+        with patch.object(movies, "plot_photodiode_sync") as plot:
+            blocks, _, _ = movies.synchronize_presentations(
+                self.table, self.path, harp, photodiode_qc_path=output)
+        plot.assert_called_once()
+        frames, times, path = plot.call_args.args
+        alignment = blocks.attrs["movie_frame_alignment"]
+        np.testing.assert_array_equal(frames, alignment["anchor_frames"])
+        np.testing.assert_array_equal(times, alignment["anchor_times"])
+        self.assertEqual(path, output)
 
     def test_explicit_gap_override_marks_unanchored_frames_unsupported(self):
         self.write_logger()
